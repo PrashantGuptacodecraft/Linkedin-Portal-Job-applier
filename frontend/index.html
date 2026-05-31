@@ -1,0 +1,2526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="LinkedIn Job Auto-Applier — Automate job discovery, external portal autofill, and resume upload from a premium web UI." />
+<title>LinkedApply Pro — LinkedIn Job Auto-Applier</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* ═══════════════════════════════════════════════════════════════════════════
+   RESET & TOKENS
+   ═══════════════════════════════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  /* Backgrounds */
+  --bg:           #0b0d14;
+  --bg-gradient:  linear-gradient(145deg, #0b0d14 0%, #111428 50%, #0f1020 100%);
+  --surface:      rgba(22, 26, 42, 0.72);
+  --surface-solid:#161a2a;
+  --surface2:     rgba(30, 35, 56, 0.65);
+  --surface3:     rgba(40, 46, 72, 0.45);
+
+  /* Borders */
+  --border:       rgba(56, 65, 110, 0.35);
+  --border-hover: rgba(91, 138, 245, 0.3);
+  --border-glow:  rgba(91, 138, 245, 0.15);
+
+  /* Accents */
+  --accent:       #5b8af5;
+  --accent2:      #3d6be0;
+  --accent-glow:  rgba(91, 138, 245, 0.18);
+  --accent-soft:  rgba(91, 138, 245, 0.08);
+
+  /* Semantic */
+  --success:      #34d399;
+  --success-bg:   rgba(52, 211, 153, 0.10);
+  --warn:         #fbbf24;
+  --warn-bg:      rgba(251, 191, 36, 0.10);
+  --danger:       #f87171;
+  --danger-bg:    rgba(248, 113, 113, 0.10);
+
+  /* Text */
+  --text:         #e8ecf4;
+  --text-secondary: #9ba3c2;
+  --text-muted:   #636b8a;
+
+  /* Sizing */
+  --radius:       12px;
+  --radius-sm:    8px;
+  --radius-lg:    16px;
+
+  /* Fonts */
+  --font:         'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --mono:         'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+
+  /* Shadows */
+  --shadow-sm:    0 1px 3px rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.2);
+  --shadow-md:    0 4px 14px rgba(0,0,0,0.35), 0 2px 6px rgba(0,0,0,0.25);
+  --shadow-lg:    0 10px 40px rgba(0,0,0,0.45), 0 4px 12px rgba(0,0,0,0.3);
+  --shadow-glow:  0 0 30px rgba(91, 138, 245, 0.08);
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg-gradient);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ANIMATED BG
+   ═══════════════════════════════════════════════════════════════════════════ */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 600px 400px at 20% 15%, rgba(91,138,245,0.06) 0%, transparent 70%),
+    radial-gradient(ellipse 500px 350px at 80% 85%, rgba(139,92,246,0.05) 0%, transparent 70%),
+    radial-gradient(ellipse 400px 300px at 55% 50%, rgba(52,211,153,0.03) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+  animation: bgPulse 12s ease-in-out infinite alternate;
+}
+@keyframes bgPulse {
+  0%   { opacity: 0.7; }
+  100% { opacity: 1; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SHELL LAYOUT
+   ═══════════════════════════════════════════════════════════════════════════ */
+.shell {
+  position: relative;
+  z-index: 1;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 1.5rem 1.5rem 6rem;
+}
+
+/* ── Top Bar ──────────────────────────────────────────────────────────────── */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.2rem 1.6rem;
+  background: var(--surface);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  margin-bottom: 1.5rem;
+  box-shadow: var(--shadow-md), var(--shadow-glow);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.logo {
+  width: 44px; height: 44px;
+  background: linear-gradient(135deg, var(--accent) 0%, #8b5cf6 100%);
+  border-radius: 12px;
+  display: grid; place-items: center;
+  font-size: 22px;
+  box-shadow: 0 4px 16px rgba(91,138,245,0.25);
+  animation: logoFloat 4s ease-in-out infinite;
+}
+@keyframes logoFloat {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-3px); }
+}
+.brand h1 {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  background: linear-gradient(135deg, #e8ecf4 30%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.brand p {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 1px;
+  letter-spacing: 0.3px;
+}
+
+.top-actions {
+  display: flex;
+  gap: .5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.stat-pill {
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: .45rem .85rem;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  transition: all 0.3s ease;
+  white-space: nowrap;
+}
+.stat-pill.connected {
+  color: var(--success);
+  border-color: rgba(52,211,153,0.35);
+  background: var(--success-bg);
+  box-shadow: 0 0 12px rgba(52,211,153,0.08);
+}
+.stat-pill.disconnected {
+  color: var(--warn);
+  border-color: rgba(251,191,36,0.35);
+  background: var(--warn-bg);
+  animation: pulseWarn 2s ease-in-out infinite;
+}
+@keyframes pulseWarn {
+  0%, 100% { box-shadow: 0 0 0 rgba(251,191,36,0); }
+  50%      { box-shadow: 0 0 12px rgba(251,191,36,0.12); }
+}
+
+/* ── Two-column Content ───────────────────────────────────────────────────── */
+.content {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CARDS (Glassmorphism)
+   ═══════════════════════════════════════════════════════════════════════════ */
+.card {
+  background: var(--surface);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.4rem 1.5rem;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+.card:hover {
+  border-color: var(--border-hover);
+  box-shadow: var(--shadow-md), var(--shadow-glow);
+}
+
+.card-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  margin-bottom: 1.1rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-title .icon {
+  font-size: 15px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   FORM ELEMENTS
+   ═══════════════════════════════════════════════════════════════════════════ */
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; }
+.row.triple { grid-template-columns: 1fr 1fr 1fr; }
+.row.single { grid-template-columns: 1fr; }
+
+.form-group { margin-bottom: .75rem; }
+
+.form-group > label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: .35rem;
+  letter-spacing: 0.2px;
+}
+.form-group > label .hint {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+input[type=text], input[type=email], input[type=tel],
+input[type=password], input[type=number], input[type=url], textarea, select {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13.5px;
+  padding: .6rem .85rem;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+  background: rgba(30, 35, 56, 0.85);
+}
+input::placeholder, textarea::placeholder { color: var(--text-muted); }
+textarea { resize: vertical; min-height: 72px; }
+select {
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23636b8a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 32px;
+}
+
+input.error, textarea.error {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-bg);
+}
+
+/* ── File upload ────────────────────────────────────────────────────────── */
+.upload-zone {
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1.2rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.15s ease;
+}
+.upload-zone:hover, .upload-zone.drag {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  transform: translateY(-1px);
+}
+.upload-zone p { font-size: 13px; color: var(--text-muted); }
+.upload-zone .icon-upload { font-size: 28px; margin-bottom: 4px; }
+.upload-zone .filename {
+  margin-top: .5rem;
+  font-size: 13px;
+  color: var(--success);
+  font-weight: 600;
+}
+#file-input { display: none; }
+
+/* ── Toggle switch ──────────────────────────────────────────────────────── */
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: .5rem 0;
+}
+.toggle-label { font-size: 13px; color: var(--text); font-weight: 500; }
+.toggle-desc  { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+
+.toggle {
+  position: relative;
+  width: 44px; height: 24px;
+  flex-shrink: 0;
+}
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle .slider {
+  position: absolute; inset: 0;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.25s ease, border-color 0.25s ease;
+}
+.toggle .slider::before {
+  content: '';
+  position: absolute;
+  left: 3px; top: 50%;
+  transform: translateY(-50%);
+  width: 16px; height: 16px;
+  background: var(--text-muted);
+  border-radius: 50%;
+  transition: left 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
+}
+.toggle input:checked + .slider {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.toggle input:checked + .slider::before {
+  left: 23px;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+
+/* ── Checkbox row ───────────────────────────────────────────────────────── */
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .3rem 0;
+}
+.checkbox-row input[type=checkbox] {
+  width: 16px; height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.checkbox-row label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  margin-bottom: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BUTTONS
+   ═══════════════════════════════════════════════════════════════════════════ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: .65rem 1.4rem;
+  border-radius: var(--radius-sm);
+  font-family: var(--font);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  letter-spacing: 0.1px;
+}
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; pointer-events: none; }
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent) 0%, #7c5cf5 100%);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(91,138,245,0.25);
+}
+.btn-primary:hover:not(:disabled) {
+  box-shadow: 0 6px 20px rgba(91,138,245,0.35);
+  transform: translateY(-1px);
+}
+
+.btn-danger {
+  background: linear-gradient(135deg, var(--danger) 0%, #dc4444 100%);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(248,113,113,0.2);
+}
+.btn-danger:hover:not(:disabled) {
+  box-shadow: 0 6px 20px rgba(248,113,113,0.3);
+  transform: translateY(-1px);
+}
+
+.btn-outline {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.btn-outline:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-muted);
+  background: rgba(255,255,255,0.03);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  padding: .5rem .8rem;
+}
+.btn-ghost:hover { color: var(--accent); }
+
+.actions {
+  display: flex;
+  gap: .7rem;
+  margin-top: 1.2rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PROGRESS / STATS
+   ═══════════════════════════════════════════════════════════════════════════ */
+#run-panel { display: none; }
+
+.progress-bar-wrap {
+  height: 5px;
+  background: var(--surface2);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 1.2rem;
+  position: relative;
+}
+.progress-bar {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), #8b5cf6);
+  border-radius: 999px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+.progress-bar::after {
+  content: '';
+  position: absolute;
+  right: 0; top: 0;
+  width: 60px; height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3));
+  animation: shimmer 1.8s ease-in-out infinite;
+}
+@keyframes shimmer {
+  0%   { opacity: 0; }
+  50%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: .6rem; margin-bottom: 1.2rem; }
+.stat {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: .7rem .6rem;
+  text-align: center;
+  transition: border-color 0.3s ease, transform 0.2s ease;
+}
+.stat:hover { transform: translateY(-2px); }
+.stat-num {
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.5px;
+}
+.stat-lbl {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  margin-top: 4px;
+}
+.stat.total   .stat-num { color: var(--accent); }
+.stat.applied .stat-num { color: var(--success); }
+.stat.skipped .stat-num { color: var(--warn); }
+.stat.failed  .stat-num { color: var(--danger); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LOG CONSOLE
+   ═══════════════════════════════════════════════════════════════════════════ */
+.log-console {
+  background: rgba(6, 8, 16, 0.85);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: .8rem 1rem;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.8;
+  height: 240px;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+.log-line {
+  display: flex;
+  gap: .6rem;
+  animation: fadeInLine 0.3s ease;
+}
+@keyframes fadeInLine {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.log-line .ts {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-size: 11px;
+  opacity: 0.6;
+}
+.log-line.info    .msg { color: var(--text); }
+.log-line.warning .msg, .log-line.warn .msg { color: var(--warn); }
+.log-line.error   .msg { color: var(--danger); }
+.log-line.success .msg { color: var(--success); }
+.log-line.system  .msg { color: var(--accent); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   JOB RESULT CARDS
+   ═══════════════════════════════════════════════════════════════════════════ */
+.job-list { display: flex; flex-direction: column; gap: .5rem; margin-top: .6rem; }
+
+.job-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: .7rem 1rem;
+  display: flex;
+  align-items: center;
+  gap: .8rem;
+  transition: border-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+  animation: slideIn 0.35s ease;
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.job-card:hover {
+  border-color: var(--border-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+.job-icon { font-size: 18px; flex-shrink: 0; }
+.job-info { flex: 1; min-width: 0; }
+.job-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.job-company {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.job-meta {
+  font-size: 11px;
+  margin-top: 2px;
+}
+.job-meta .success-text { color: var(--success); }
+.job-meta .danger-text  { color: var(--danger); }
+.job-meta .muted-text   { color: var(--text-muted); }
+.job-meta a { color: var(--accent); text-decoration: none; }
+.job-meta a:hover { text-decoration: underline; }
+
+.job-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.job-badge.applied { background: var(--success-bg); color: var(--success); }
+.job-badge.skipped { background: var(--warn-bg);    color: var(--warn); }
+.job-badge.failed  { background: var(--danger-bg);  color: var(--danger); }
+.job-badge.pending { background: var(--accent-soft); color: var(--accent); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DIAGNOSTICS PANEL
+   ═══════════════════════════════════════════════════════════════════════════ */
+#diag-panel { display: none; }
+.diag-list { list-style: none; }
+.diag-list li {
+  padding: .55rem .8rem;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--accent);
+  transition: background 0.15s ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.diag-list li:hover { background: var(--surface2); }
+.diag-list li .diag-icon { opacity: 0.6; }
+.diag-files {
+  margin-top: .5rem;
+  padding: .6rem .8rem;
+  background: var(--surface2);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.diag-files a {
+  color: var(--accent);
+  text-decoration: none;
+  display: block;
+  padding: .25rem 0;
+}
+.diag-files a:hover { text-decoration: underline; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ALERT BANNERS
+   ═══════════════════════════════════════════════════════════════════════════ */
+.alert-banner {
+  border-radius: var(--radius-sm);
+  padding: .8rem 1rem;
+  font-size: 13px;
+  display: none;
+  margin-bottom: .8rem;
+  align-items: center;
+  gap: 8px;
+  animation: fadeIn 0.3s ease;
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.alert-banner.visible { display: flex; }
+.alert-banner.warn {
+  background: var(--warn-bg);
+  border: 1px solid rgba(251,191,36,0.25);
+  color: var(--warn);
+}
+.alert-banner.info {
+  background: var(--accent-soft);
+  border: 1px solid rgba(91,138,245,0.2);
+  color: var(--accent);
+}
+.alert-banner.danger {
+  background: var(--danger-bg);
+  border: 1px solid rgba(248,113,113,0.2);
+  color: var(--danger);
+}
+.alert-banner .alert-icon { font-size: 16px; flex-shrink: 0; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BOTTOM BAR
+   ═══════════════════════════════════════════════════════════════════════════ */
+.bottom-bar {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  z-index: 100;
+  background: rgba(11, 13, 20, 0.85);
+  backdrop-filter: blur(20px) saturate(1.3);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  border-top: 1px solid var(--border);
+  padding: .75rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .8rem;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SECTION HELPERS
+   ═══════════════════════════════════════════════════════════════════════════ */
+.section-gap { margin-top: 1.2rem; }
+.section-divider {
+  height: 1px;
+  background: var(--border);
+  margin: .8rem 0;
+  border: none;
+}
+
+.empty-state {
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 1.5rem 1rem;
+}
+.empty-state .empty-icon {
+  font-size: 32px;
+  margin-bottom: .5rem;
+  opacity: 0.5;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SCROLLBAR
+   ═══════════════════════════════════════════════════════════════════════════ */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   RESPONSIVE
+   ═══════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 960px) {
+  .content { grid-template-columns: 1fr; }
+  .topbar { flex-direction: column; align-items: stretch; }
+  .top-actions { justify-content: flex-start; }
+}
+@media (max-width: 600px) {
+  .shell { padding: 1rem .8rem 5rem; }
+  .topbar { padding: 1rem; }
+  .card { padding: 1.1rem 1.2rem; }
+  .row { grid-template-columns: 1fr; }
+  .row.triple { grid-template-columns: 1fr; }
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  .brand h1 { font-size: 17px; }
+  .bottom-bar { padding: .6rem .8rem; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   LOADING SPINNER
+   ═══════════════════════════════════════════════════════════════════════════ */
+.spinner {
+  width: 16px; height: 16px;
+  border: 2px solid rgba(255,255,255,0.2);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  display: none;
+}
+.spinner.active { display: inline-block; }
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PROFILE WORKBENCH (new simplified UI)
+   ═══════════════════════════════════════════════════════════════════════════ */
+.legacy-hidden { display: none !important; }
+
+.workbench {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+  gap: 1.25rem;
+  margin-top: 1rem;
+}
+
+.workbench-column {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.section-tabs {
+  display: flex;
+  gap: .65rem;
+  padding: .45rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(14, 17, 28, 0.72);
+  backdrop-filter: blur(16px) saturate(1.25);
+}
+
+.section-tab {
+  flex: 1;
+  border: 0;
+  border-radius: 12px;
+  padding: .95rem 1rem;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.section-tab.active {
+  color: #fff;
+  background: linear-gradient(135deg, rgba(91,138,245,0.95), rgba(124,92,245,0.95));
+  box-shadow: 0 8px 24px rgba(91,138,245,0.28);
+}
+
+.setup-grid {
+  display: grid;
+  grid-template-columns: 1.2fr .8fr;
+  gap: 1rem;
+}
+
+.profile-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(91,138,245,0.22);
+  background: rgba(91,138,245,0.08);
+  color: #cfe0ff;
+  padding: .45rem .75rem;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.setup-summary {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 1rem;
+  background: rgba(255,255,255,0.02);
+}
+
+.setup-summary .subject-line {
+  font-size: 18px;
+  line-height: 1.35;
+  margin: .6rem 0 .95rem;
+}
+
+.setup-summary .subject-line span {
+  color: var(--accent);
+}
+
+.setup-summary .meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: .75rem;
+  margin-top: .8rem;
+}
+
+.setup-summary .meta-block {
+  flex: 1;
+}
+
+.setup-summary .meta-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .9px;
+  margin-bottom: .25rem;
+}
+
+.setup-summary .meta-value {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.profile-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .75rem;
+  margin-bottom: .9rem;
+}
+
+.profile-mode-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255,255,255,0.02);
+  padding: .95rem 1rem;
+  cursor: pointer;
+  transition: border-color .2s ease, transform .2s ease, background .2s ease;
+}
+
+.profile-mode-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-hover);
+}
+
+.profile-mode-card.active {
+  background: linear-gradient(180deg, rgba(91,138,245,0.12), rgba(91,138,245,0.05));
+  border-color: rgba(91,138,245,0.42);
+}
+
+.field-locked {
+  opacity: 0.65;
+}
+
+.field-locked input,
+.field-locked textarea,
+.field-locked select,
+.field-locked button {
+  cursor: not-allowed;
+}
+
+.profile-mode-card h4 {
+  margin-bottom: .3rem;
+  font-size: 14px;
+}
+
+.profile-mode-card p {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.toggle-stack {
+  display: grid;
+  gap: .75rem;
+}
+
+.setup-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  margin-top: .9rem;
+}
+
+.setup-pill {
+  border: 1px solid rgba(91,138,245,0.22);
+  background: rgba(91,138,245,0.08);
+  color: #cfe0ff;
+  border-radius: 999px;
+  padding: .35rem .7rem;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.resume-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .75rem;
+  margin-bottom: .9rem;
+}
+
+.mode-field-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: .5rem;
+}
+
+.role-picker {
+  display: flex;
+  flex-direction: column;
+  gap: .55rem;
+}
+
+.role-chip {
+  width: 100%;
+  border: 1px solid rgba(91,138,245,0.22);
+  border-radius: 14px;
+  background: rgba(255,255,255,0.02);
+  color: var(--text);
+  padding: .85rem 1rem;
+  text-align: left;
+  cursor: pointer;
+  transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease;
+}
+
+.role-chip:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-hover);
+  box-shadow: 0 8px 20px rgba(0,0,0,0.18);
+}
+
+.role-chip.active {
+  border-color: rgba(91,138,245,0.58);
+  background: linear-gradient(135deg, rgba(91,138,245,0.18), rgba(124,92,245,0.12));
+  box-shadow: 0 10px 24px rgba(91,138,245,0.14);
+}
+
+.role-chip-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.role-chip-sub {
+  margin-top: .25rem;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.role-chip-check {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--success);
+  opacity: 0;
+}
+
+.role-chip.active .role-chip-check {
+  opacity: 1;
+}
+
+.resume-mode-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255,255,255,0.02);
+  padding: 1rem;
+  cursor: pointer;
+  transition: border-color .2s ease, transform .2s ease, background .2s ease;
+}
+
+.resume-mode-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-hover);
+}
+
+.resume-mode-card.active {
+  background: linear-gradient(180deg, rgba(91,138,245,0.12), rgba(91,138,245,0.05));
+  border-color: rgba(91,138,245,0.42);
+}
+
+.resume-mode-card h4 {
+  margin-bottom: .35rem;
+  font-size: 14px;
+}
+
+.resume-mode-card p {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.preview-panel {
+  position: sticky;
+  top: 1rem;
+}
+
+.preview-card {
+  border-radius: 20px;
+  border: 1px solid rgba(91,138,245,0.18);
+  background:
+    radial-gradient(circle at top right, rgba(91,138,245,0.16), transparent 36%),
+    radial-gradient(circle at bottom left, rgba(52,211,153,0.08), transparent 28%),
+    rgba(10, 13, 21, 0.86);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+  padding: 1.3rem;
+}
+
+.preview-card h3 {
+  font-size: 17px;
+  margin-bottom: .4rem;
+}
+
+.preview-line {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: .3rem;
+}
+
+.preview-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .45rem;
+  margin-top: .8rem;
+}
+
+.preview-pill {
+  border: 1px solid rgba(91,138,245,0.22);
+  background: rgba(91,138,245,0.08);
+  color: #cfe0ff;
+  border-radius: 999px;
+  padding: .35rem .65rem;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.summary-box {
+  margin-top: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(255,255,255,0.02);
+  padding: 1rem;
+}
+
+.summary-box pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+  font-family: var(--font);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+@media (max-width: 960px) {
+  .workbench { grid-template-columns: 1fr; }
+  .preview-panel { position: static; }
+  .setup-grid { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ═══ TOP BAR ══════════════════════════════════════════════════════════ -->
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo">💼</div>
+      <div>
+        <h1>LinkedApply Pro</h1>
+        <p>Premium Autopilot Client</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <div class="stat-pill disconnected" id="backend-status">API: checking…</div>
+      <div class="stat-pill" id="jobs-found-pill">0 JOBS</div>
+      <div class="stat-pill" id="progress-pill">0% DONE</div>
+    </div>
+  </div>
+
+  <!-- ═══ PROFILE WORKBENCH ═══════════════════════════════════════════════ -->
+  <div class="workbench" id="workbench">
+    <div class="workbench-column">
+      <div class="section-tabs" role="tablist" aria-label="Profile sections">
+        <button class="section-tab active" type="button" data-tab="setup" onclick="switchWorkbenchTab('setup')">Setup & Search</button>
+        <button class="section-tab" type="button" data-tab="candidate" onclick="switchWorkbenchTab('candidate')">Candidate Profile</button>
+        <button class="section-tab" type="button" data-tab="resume" onclick="switchWorkbenchTab('resume')">Resume & Tailoring</button>
+      </div>
+
+      <div class="card" id="setup-panel">
+        <div class="card-title"><span class="icon">🔍</span> Setup & Search</div>
+        <div class="setup-grid">
+          <div>
+            <div class="card" style="padding:1rem;background:rgba(255,255,255,0.015)">
+              <div class="card-title" style="margin-bottom:.8rem"><span class="icon">🔐</span> Login Credentials</div>
+              <div class="row">
+                <div class="form-group">
+                  <label>LinkedIn Email</label>
+                  <input type="email" id="linkedin_email" placeholder="LinkedIn Email" />
+                </div>
+                <div class="form-group">
+                  <label>LinkedIn Password</label>
+                  <input type="password" id="linkedin_password" placeholder="LinkedIn Password" />
+                </div>
+              </div>
+              <div class="row">
+                <div class="form-group">
+                  <label>Gmail Address</label>
+                  <input type="email" id="gmail_address" placeholder="Gmail Address" />
+                </div>
+                <div class="form-group">
+                  <label>Gmail App Password</label>
+                  <input type="password" id="gmail_app_password" placeholder="Gmail App Password" />
+                </div>
+              </div>
+              <div class="alert-banner info visible" style="display:flex;margin-top:.6rem">
+                <span class="alert-icon">⚠️</span>
+                <span>Use Gmail App Password, not your primary password. Enable 2-Step Verification first.</span>
+              </div>
+            </div>
+
+            <div class="card section-gap" style="padding:1rem;background:rgba(255,255,255,0.015)">
+              <div class="card-title" style="margin-bottom:.8rem"><span class="icon">🔍</span> Search Config</div>
+              <div class="form-group">
+                <label>Keyword / Skill Set</label>
+                <input type="text" id="keywords" value="Java Developer + C2C" placeholder="Java Developer + C2C" />
+              </div>
+              <div class="form-group">
+                <label>Active Profile</label>
+                <div class="profile-badge">👤 Java Developer</div>
+              </div>
+              <div class="setup-summary">
+                <div class="meta-label">Subject</div>
+                <div class="subject-line">Submission <span>“SkillSet: Java Developer”</span> Local to <span>“USA”</span></div>
+                <div class="setup-pills">
+                  <span class="setup-pill">Java</span>
+                  <span class="setup-pill">OOPs</span>
+                  <span class="setup-pill">Spring Boot</span>
+                  <span class="setup-pill">Hibernate/JPA</span>
+                </div>
+                <div class="meta-row">
+                  <div class="meta-block">
+                    <div class="meta-label">Time Range</div>
+                    <div class="meta-value">
+                      <select id="posted_within_hours">
+                        <option value="24">Last 24h</option>
+                        <option value="72">Last 3 days</option>
+                        <option value="168">Last week</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="meta-block">
+                    <div class="meta-label">Search In</div>
+                    <div class="meta-value">
+                      <select id="search_in">
+                        <option value="linkedin_posts">LinkedIn Posts</option>
+                        <option value="linkedin_jobs">LinkedIn Jobs</option>
+                        <option value="gmail">Gmail</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                <div class="form-group" style="margin-top:.9rem">
+                  <label>Exact LinkedIn Job URL <span class="hint">(optional)</span></label>
+                  <input type="url" id="job_url" placeholder="https://www.linkedin.com/jobs/view/..." />
+                </div>
+              </div>
+            </div>
+          </div>
+          <div>
+            <div class="setup-summary" style="height:100%">
+              <div class="card-title" style="margin-bottom:.7rem"><span class="icon">🧭</span> Current Profile</div>
+              <div class="meta-label">Selected role</div>
+              <div class="meta-value" id="setup-role-preview" style="font-size:20px;font-weight:700;margin-bottom:.7rem">Java Developer + C2C</div>
+              <div class="meta-label">Goal</div>
+              <div class="meta-value" style="margin-bottom:.75rem">Use the selected role, current profile, and resume to tailor the next run.</div>
+              <div class="meta-label">Notes</div>
+              <div class="meta-value">The rest of the automation can stay hidden behind this setup-first workflow.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" id="candidate-panel">
+        <div class="card-title"><span class="icon">👤</span> Candidate Profile</div>
+        <div class="profile-mode-grid">
+          <div class="profile-mode-card active" id="profile-manual-card" onclick="setProfileMode('manual')">
+            <h4>Manual</h4>
+            <p>You edit the fields yourself and keep the uploaded resume unchanged.</p>
+          </div>
+          <div class="profile-mode-card" id="profile-ai-card" onclick="setProfileMode('ai')">
+            <h4>AI</h4>
+            <p>Role-based skills, projects, and PDF generation are auto-tailored from the job config.</p>
+          </div>
+        </div>
+        <div class="row">
+          <div class="form-group">
+            <label>Full Name</label>
+            <input type="text" id="name" value="Prashant Gupta" placeholder="Prashant Gupta" />
+          </div>
+          <div class="form-group">
+            <label>Target Role</label>
+            <input type="hidden" id="profile_mode" value="ai" />
+            <input type="hidden" id="target_role" value="Java Developer + C2C" />
+            <div class="role-picker" id="role-picker">
+              <button class="role-chip active" type="button" data-role="Java Developer + C2C" data-focus="Java, Spring Boot, Hibernate/JPA, REST APIs, MySQL" onclick="setTargetRole(this)">
+                <div>
+                  <div class="role-chip-main">Java Developer + C2C <span class="role-chip-check">✓</span></div>
+                  <div class="role-chip-sub">Core backend roles with contract-to-contract targeting</div>
+                </div>
+              </button>
+              <button class="role-chip" type="button" data-role="Business Analyst + C2C" data-focus="SQL, reporting, requirements analysis, stakeholder communication" onclick="setTargetRole(this)">
+                <div>
+                  <div class="role-chip-main">Business Analyst + C2C <span class="role-chip-check">✓</span></div>
+                  <div class="role-chip-sub">Requirement gathering, process mapping, reporting, and coordination</div>
+                </div>
+              </button>
+              <button class="role-chip" type="button" data-role="Data Analyst + C2C" data-focus="Excel, SQL, dashboards, data cleaning, Power BI" onclick="setTargetRole(this)">
+                <div>
+                  <div class="role-chip-main">Data Analyst + C2C <span class="role-chip-check">✓</span></div>
+                  <div class="role-chip-sub">Analysis, reporting, dashboards, and data-driven insights</div>
+                </div>
+              </button>
+              <button class="role-chip" type="button" data-role="Frontend Developer" data-focus="HTML, CSS, JavaScript, React, responsive UI" onclick="setTargetRole(this)">
+                <div>
+                  <div class="role-chip-main">Frontend Developer <span class="role-chip-check">✓</span></div>
+                  <div class="role-chip-sub">UI development, responsive layouts, and client-side logic</div>
+                </div>
+              </button>
+              <button class="role-chip" type="button" data-role="Web Developer" data-focus="HTML, CSS, JavaScript, web app integration" onclick="setTargetRole(this)">
+                <div>
+                  <div class="role-chip-main">Web Developer <span class="role-chip-check">✓</span></div>
+                  <div class="role-chip-sub">General web development and interface implementation</div>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="form-group">
+            <label>Email</label>
+            <input type="email" id="email" value="adityagupta983869@gmail.com" placeholder="you@example.com" />
+          </div>
+          <div class="form-group">
+            <label>Phone</label>
+            <input type="tel" id="phone" value="+91-9838693305" placeholder="+91 98XXXXXX05" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="form-group">
+            <label>Location</label>
+            <input type="text" id="location" value="Ghaziabad, India" placeholder="Ghaziabad, India" />
+          </div>
+          <div class="form-group">
+            <label>LinkedIn Profile URL <span class="hint">(optional)</span></label>
+            <input type="url" id="linkedin_url" value="https://www.linkedin.com/in/prashant-gupta-9" placeholder="https://linkedin.com/in/yourname" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Cover Letter / Message</label>
+          <textarea id="cover_text" placeholder="Brief cover text used for portal message fields…">I am interested in Java backend roles and can tailor my resume for the job description.</textarea>
+        </div>
+        <div class="form-group">
+          <label>Technical Skills</label>
+          <textarea id="technical_skills" placeholder="Java, Spring Boot, Hibernate/JPA, REST APIs, MySQL, JDBC, Maven, Git, GitHub, Postman, DSA, HTML, CSS, JavaScript">Java, OOPs, Spring Boot, Hibernate/JPA, REST APIs, MySQL, JDBC, Maven, Git, GitHub, Postman, DSA, HTML, CSS, JavaScript</textarea>
+        </div>
+        <div class="form-group">
+          <label>Projects <span class="hint">(add your project details later)</span></label>
+          <textarea id="projects" placeholder="Project title, stack, and impact...">Project details will be added later.</textarea>
+        </div>
+      </div>
+
+      <div class="card legacy-hidden" id="resume-panel">
+        <div class="card-title"><span class="icon">📄</span> Resume & Tailoring</div>
+
+        <div class="resume-mode-grid">
+          <div class="resume-mode-card active" id="mode-upload-card" onclick="setResumeMode('upload')">
+            <h4>Self Attach</h4>
+            <p>Upload your existing PDF or DOCX resume and use it as-is for portal submissions.</p>
+          </div>
+          <div class="resume-mode-card" id="mode-generate-card" onclick="setResumeMode('generate')">
+            <h4>Generate by Role</h4>
+            <p>Draft a resume outline tailored to the selected role, skills, and projects.</p>
+          </div>
+        </div>
+
+        <div id="upload-mode-panel">
+          <label style="margin-bottom:.4rem;display:block;font-size:12px;font-weight:500;color:var(--text-secondary)">Resume File Upload</label>
+          <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
+            <div class="icon-upload">📎</div>
+            <p>Click or drag & drop your resume</p>
+            <div class="filename" id="upload-name">No file selected yet</div>
+          </div>
+          <input type="file" id="file-input" accept=".pdf,.doc,.docx" />
+        </div>
+
+        <div id="generate-mode-panel" class="legacy-hidden">
+          <div class="row">
+            <div class="form-group">
+              <label>Resume Tone</label>
+              <select id="resume_tone">
+                <option value="professional">Professional</option>
+                <option value="concise">Concise</option>
+                <option value="ats">ATS-friendly</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Focus Area</label>
+              <input type="text" id="resume_focus" value="Java backend / Spring Boot" placeholder="Java backend / Spring Boot" />
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Generation Notes</label>
+            <textarea id="resume_notes" placeholder="Tell me what to emphasize in the generated resume...">Use the skills above as the baseline. Add my projects later when I share them.</textarea>
+          </div>
+          <div class="toggle-stack section-gap">
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-label">AI-Tailor Email Pitch</div>
+                <div class="toggle-desc">Auto-generate the email message for the job config search.</div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="ai_tailor_email" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-label">AI-Tailor Resume PDF</div>
+                <div class="toggle-desc">Generate a role-specific PDF from the selected profile template.</div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="ai_tailor_resume_pdf" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="mode-field-note">Turn these off to keep the flow manual and use the uploaded resume file instead.</div>
+        </div>
+
+        <div class="actions">
+          <button class="btn btn-primary" type="button" onclick="generateResumeDraft()">✨ Generate Resume PDF</button>
+          <button class="btn btn-outline" type="button" onclick="resetProfileFields()">↻ Reset Profile</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="workbench-column preview-panel">
+      <div class="preview-card" id="preview-card">
+        <div class="card-title" style="margin-bottom:.7rem"><span class="icon">🪪</span> Resume Preview</div>
+        <h3 id="preview-name">Prashant Gupta</h3>
+        <div class="preview-line" id="preview-role">Java Developer</div>
+        <div class="preview-line" id="preview-contact">+91-9838693305 · adityagupta983869@gmail.com</div>
+        <div class="preview-line" id="preview-location">Ghaziabad, India</div>
+        <div class="preview-pills" id="skills-pill-list">
+          <span class="preview-pill">Java</span>
+          <span class="preview-pill">Spring Boot</span>
+          <span class="preview-pill">Hibernate/JPA</span>
+          <span class="preview-pill">REST APIs</span>
+        </div>
+        <div class="summary-box">
+          <div class="card-title" style="margin-bottom:.55rem"><span class="icon">🧾</span> Generated Resume Draft</div>
+          <pre id="preview-summary">Self attach mode is active. Upload a resume to use your existing PDF, or switch to generate mode to create a role-based resume draft.</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ TWO-COLUMN CONTENT ═══════════════════════════════════════════════ -->
+  <div class="content legacy-hidden">
+
+    <!-- ── LEFT COLUMN: Configuration ─────────────────────────────────────── -->
+    <div class="column">
+
+      <!-- Login Credentials -->
+      <div class="card" id="card-login">
+        <div class="card-title"><span class="icon">🔐</span> Login Credentials</div>
+        <div class="row">
+          <div class="form-group">
+            <label>LinkedIn Email</label>
+            <input type="email" id="linkedin_email" placeholder="you@email.com" />
+          </div>
+          <div class="form-group">
+            <label>LinkedIn Password</label>
+            <input type="password" id="linkedin_password" placeholder="••••••••" />
+          </div>
+        </div>
+        <div class="alert-banner info visible" style="display:flex;margin-top:.6rem">
+          <span class="alert-icon">💡</span>
+          <span>Leave blank to log in manually in the browser window. Recommended for first use.</span>
+        </div>
+      </div>
+
+      <!-- Job Search -->
+      <div class="card" id="card-search">
+        <div class="card-title"><span class="icon">🔍</span> Job Search</div>
+        <div class="form-group">
+          <label>Keywords <span class="hint">(or use the URL fields below)</span></label>
+          <input type="text" id="keywords" placeholder="e.g. Python backend developer intern" />
+        </div>
+        <div class="row">
+          <div class="form-group">
+            <label>LinkedIn Search URL <span class="hint">(optional)</span></label>
+            <input type="url" id="search_url" placeholder="https://linkedin.com/jobs/search/?..." />
+          </div>
+          <div class="form-group">
+            <label>Single Job URL <span class="hint">(optional)</span></label>
+            <input type="url" id="job_url" placeholder="https://linkedin.com/jobs/view/…" />
+          </div>
+        </div>
+
+        <hr class="section-divider" />
+
+        <!-- Filters -->
+        <div class="card-title" style="margin-bottom:.8rem"><span class="icon">⚙️</span> Filters</div>
+        <div class="row triple">
+          <div class="form-group">
+            <label>Max jobs</label>
+            <input type="number" id="max_jobs" value="5" min="1" max="25" />
+          </div>
+          <div class="form-group">
+            <label>Posted within</label>
+            <select id="posted_within_hours">
+              <option value="24">Last 24 hours</option>
+              <option value="72">Last 3 days</option>
+              <option value="168">Last week</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Locations <span class="hint">(comma-sep)</span></label>
+            <input type="text" id="locations" placeholder="Bengaluru, Pune" />
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="checkbox-row">
+            <input type="checkbox" id="easy_apply_only" />
+            <label for="easy_apply_only">Easy Apply only</label>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="remote_only" />
+            <label for="remote_only">Remote only</label>
+          </div>
+        </div>
+
+        <div class="toggle-row" style="margin-top:.6rem">
+          <div>
+            <div class="toggle-label">Visible browser</div>
+            <div class="toggle-desc">Required for 2FA &amp; manual login (recommended)</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="headless" checked />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Candidate Profile -->
+      <div class="card" id="card-candidate">
+        <div class="card-title"><span class="icon">👤</span> Candidate Profile</div>
+        <div class="row">
+          <div class="form-group">
+            <label>Full Name</label>
+            <input type="text" id="name" placeholder="John Doe" />
+          </div>
+          <div class="form-group">
+            <label>Email</label>
+            <input type="email" id="email" placeholder="john@example.com" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="form-group">
+            <label>Phone</label>
+            <input type="tel" id="phone" placeholder="+1 555 123 4567" />
+          </div>
+          <div class="form-group">
+            <label>Location</label>
+            <input type="text" id="location" placeholder="San Francisco, CA" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label>LinkedIn Profile URL <span class="hint">(optional)</span></label>
+          <input type="url" id="linkedin_url" placeholder="https://linkedin.com/in/yourname" />
+        </div>
+        <div class="form-group">
+          <label>Cover Letter / Message</label>
+          <textarea id="cover_text" placeholder="Brief cover text used for portal message fields…"></textarea>
+        </div>
+
+        <!-- Resume Upload -->
+        <label style="margin-bottom:.4rem;display:block;font-size:12px;font-weight:500;color:var(--text-secondary)">Resume (PDF or DOCX)</label>
+        <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
+          <div class="icon-upload">📎</div>
+          <p>Click or drag & drop your resume</p>
+          <div class="filename" id="upload-name"></div>
+        </div>
+        <input type="file" id="file-input" accept=".pdf,.doc,.docx" />
+      </div>
+
+      <!-- Actions -->
+      <div class="actions">
+        <button class="btn btn-primary" id="start-btn" onclick="startRun()">
+          <span id="start-btn-text">▶ Start Automation</span>
+          <span class="spinner" id="start-spinner"></span>
+        </button>
+        <button class="btn btn-danger" id="stop-btn" disabled onclick="stopRun()">
+          ■ Stop
+        </button>
+        <button class="btn btn-outline" id="diag-btn" onclick="toggleDiagnostics()">
+          🗂 Diagnostics
+        </button>
+        <button class="btn btn-ghost" onclick="resetRunUI()">
+          ↻ Reset
+        </button>
+      </div>
+
+    </div><!-- /left column -->
+
+    <!-- ── RIGHT COLUMN: Live Results ─────────────────────────────────────── -->
+    <div class="column">
+
+      <!-- Run Panel -->
+      <div id="run-panel">
+        <div class="card">
+          <div class="card-title"><span class="icon">🚀</span> Run Progress</div>
+
+          <div class="alert-banner warn" id="manual-alert">
+            <span class="alert-icon">⚠️</span>
+            <span>Manual action required in the browser window (login / 2FA). The bot will continue automatically.</span>
+          </div>
+
+          <div class="progress-bar-wrap">
+            <div class="progress-bar" id="progress-bar"></div>
+          </div>
+
+          <div class="stats">
+            <div class="stat total">
+              <div class="stat-num" id="s-total">0</div>
+              <div class="stat-lbl">Total</div>
+            </div>
+            <div class="stat applied">
+              <div class="stat-num" id="s-applied">0</div>
+              <div class="stat-lbl">Applied</div>
+            </div>
+            <div class="stat skipped">
+              <div class="stat-num" id="s-skipped">0</div>
+              <div class="stat-lbl">Skipped</div>
+            </div>
+            <div class="stat failed">
+              <div class="stat-num" id="s-failed">0</div>
+              <div class="stat-lbl">Failed</div>
+            </div>
+          </div>
+
+          <div class="log-console" id="log-console"></div>
+        </div>
+
+        <!-- Job Results -->
+        <div class="card section-gap">
+          <div class="card-title"><span class="icon">📋</span> Job Results</div>
+          <div class="job-list" id="job-list">
+            <div class="empty-state" id="job-list-empty">
+              <div class="empty-icon">📭</div>
+              <div>Results will appear here as jobs are processed…</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Diagnostics Panel -->
+      <div id="diag-panel">
+        <div class="card">
+          <div class="card-title"><span class="icon">🗂</span> Captured Diagnostics</div>
+          <div id="diag-content">
+            <ul class="diag-list" id="diag-list">
+              <li style="color:var(--text-muted);cursor:default">Click "Diagnostics" to load…</li>
+            </ul>
+            <div id="diag-detail"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Empty state when nothing is running -->
+      <div id="idle-panel">
+        <div class="card" style="text-align:center;padding:3rem 2rem">
+          <div style="font-size:48px;margin-bottom:1rem;opacity:0.6">🚀</div>
+          <div style="font-size:16px;font-weight:600;margin-bottom:.5rem">Ready to Launch</div>
+          <div style="color:var(--text-muted);font-size:13px;max-width:300px;margin:0 auto">
+            Fill in your search criteria and candidate profile, then hit
+            <strong style="color:var(--accent)">Start Automation</strong> to begin.
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /right column -->
+
+  </div><!-- /content -->
+</div><!-- /shell -->
+
+<!-- ═══ BOTTOM BAR ═══════════════════════════════════════════════════════ -->
+<div class="bottom-bar legacy-hidden">
+  <button class="btn btn-outline btn-ghost" onclick="resetRunUI()">↻ Reset</button>
+  <button class="btn btn-primary" id="bottom-start-btn" onclick="startRun()">▶ Start Automation</button>
+  <button class="btn btn-danger" id="bottom-stop-btn" disabled onclick="stopRun()">■ Stop</button>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   STATE
+   ═══════════════════════════════════════════════════════════════════════════ */
+let resumePath  = null;
+let resumeMode  = 'upload';
+let profileMode = 'manual';
+let abortCtrl   = null;
+let processed   = 0;
+let totalJobs   = 0;
+let counts      = { applied: 0, skipped: 0, failed: 0 };
+let isRunning   = false;
+
+const API = (window.location.protocol === 'file:') ? 'http://localhost:8000' : window.location.origin;
+
+const ROLE_TEMPLATES = {
+  'Java Developer + C2C': {
+    focus: 'Java, Spring Boot, Hibernate/JPA, REST APIs, MySQL',
+    skills: [
+      'Java', 'Spring Boot', 'Hibernate/JPA', 'REST APIs', 'MySQL',
+      'Maven', 'Git & GitHub', 'Docker', 'JWT Authentication',
+    ],
+    projects: [
+      {
+        title: 'Employee Management System',
+        points: [
+          'Manage employee records and departments',
+          'Attendance and leave management',
+          'Role-based authentication',
+        ],
+      },
+      {
+        title: 'Online Banking System',
+        points: [
+          'Secure account and transaction management',
+          'Fund transfer functionality',
+          'Transaction history tracking',
+        ],
+      },
+      {
+        title: 'Job Portal Backend API',
+        points: [
+          'Recruiter and candidate management',
+          'Job posting and application APIs',
+          'Resume upload support',
+        ],
+      },
+    ],
+  },
+  'Business Analyst + C2C': {
+    focus: 'SQL, reporting, requirements analysis, stakeholder communication',
+    skills: ['SQL', 'Excel', 'Power BI', 'Tableau', 'Jira', 'Confluence', 'BPMN', 'UML', 'Agile/Scrum', 'Requirement Gathering'],
+    projects: [
+      { title: 'HR Recruitment Process Analysis', points: ['Documented recruitment workflows', 'Created user stories and BRD', 'Identified process improvements'] },
+      { title: 'Hospital Management Analysis', points: ['Mapped patient management processes', 'Performed gap analysis', 'Prepared requirement documents'] },
+      { title: 'E-commerce KPI Dashboard', points: ['Analyzed sales performance', 'Created business dashboards', 'Generated actionable insights'] },
+    ],
+  },
+  'Data Analyst + C2C': {
+    focus: 'Excel, SQL, dashboards, data cleaning, Power BI',
+    skills: ['Python', 'SQL', 'Excel', 'Power BI', 'Tableau', 'Pandas', 'NumPy', 'Statistics', 'Data Visualization'],
+    projects: [
+      { title: 'Netflix Data Analysis', points: ['Analyzed content trends and genres', 'Created interactive dashboards', 'Visualized key insights'] },
+      { title: 'Sales Forecasting Dashboard', points: ['Predicted future sales trends', 'Built KPI monitoring dashboards', 'Analyzed revenue growth'] },
+      { title: 'HR Attrition Analysis', points: ['Studied employee turnover patterns', 'Generated department-wise insights', 'Created analytical reports'] },
+    ],
+  },
+  'Frontend Developer': {
+    focus: 'HTML, CSS, JavaScript, React, responsive UI',
+    skills: ['HTML5', 'CSS3', 'JavaScript', 'TypeScript', 'React.js', 'Next.js', 'Tailwind CSS', 'Redux', 'Git & GitHub'],
+    projects: [
+      { title: 'AI Resume Builder', points: ['Dynamic resume generation', 'Multiple resume templates', 'PDF export functionality'] },
+      { title: 'E-commerce Frontend', points: ['Responsive product catalog', 'Cart and wishlist features', 'REST API integration'] },
+      { title: 'Task Management App', points: ['Create and manage tasks', 'Drag-and-drop interface', 'Progress tracking dashboard'] },
+    ],
+  },
+  'Web Developer': {
+    focus: 'HTML, CSS, JavaScript, web app integration',
+    skills: ['HTML5', 'CSS3', 'JavaScript', 'React.js', 'Node.js', 'Express.js', 'MongoDB', 'MySQL', 'REST APIs', 'Git & GitHub'],
+    projects: [
+      { title: 'LinkedIn Job Portal', points: ['Job posting and application system', 'Resume upload functionality', 'Role-based authentication'] },
+      { title: 'College Event Management System', points: ['Event registration platform', 'QR-based attendance tracking', 'Admin dashboard'] },
+      { title: 'Freelancer Marketplace', points: ['Project posting system', 'Proposal management', 'User reviews and ratings'] },
+    ],
+  },
+};
+
+switchWorkbenchTab('setup');
+setResumeMode('upload');
+setProfileMode('manual');
+refreshResumePreview();
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BACKEND HEALTH CHECK
+   ═══════════════════════════════════════════════════════════════════════════ */
+async function checkBackendConnection() {
+  const el = document.getElementById('backend-status');
+  if (!el) return;
+  try {
+    const res = await fetch(`${API}/api/health`, { signal: AbortSignal.timeout(4000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    el.textContent = `API: connected`;
+    el.classList.remove('disconnected');
+    el.classList.add('connected');
+  } catch {
+    el.textContent = 'API: offline';
+    el.classList.remove('connected');
+    el.classList.add('disconnected');
+  }
+}
+
+// Check on load and every 15s
+checkBackendConnection();
+setInterval(checkBackendConnection, 15000);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   RESUME UPLOAD
+   ═══════════════════════════════════════════════════════════════════════════ */
+document.getElementById('file-input').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (file) await uploadResume(file);
+});
+
+['name', 'target_role', 'email', 'phone', 'location', 'technical_skills', 'projects', 'cover_text', 'resume_focus', 'resume_notes', 'linkedin_email', 'linkedin_password', 'gmail_address', 'gmail_app_password', 'keywords', 'job_url', 'search_url', 'ai_tailor_email', 'ai_tailor_resume_pdf'].forEach((id) => {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener('input', refreshResumePreview);
+  }
+});
+
+syncRoleSelectionFromInput();
+
+const zone = document.getElementById('upload-zone');
+zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+zone.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  zone.classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if (file) await uploadResume(file);
+});
+
+async function uploadResume(file) {
+  const nameEl = document.getElementById('upload-name');
+  nameEl.textContent = '⏳ Uploading…';
+  nameEl.style.color = 'var(--text-secondary)';
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const res  = await fetch(`${API}/api/upload-resume`, { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.path) {
+      resumePath = data.path;
+      nameEl.textContent = `✓ ${data.filename}`;
+      nameEl.style.color = 'var(--success)';
+      refreshResumePreview();
+    } else {
+      nameEl.textContent = `✗ ${data.detail || 'Upload failed'}`;
+      nameEl.style.color = 'var(--danger)';
+    }
+  } catch (err) {
+    nameEl.textContent = `✗ ${err.message}`;
+    nameEl.style.color = 'var(--danger)';
+  }
+}
+
+function switchWorkbenchTab(tab) {
+  const buttons = document.querySelectorAll('.section-tab');
+  buttons.forEach((button) => {
+    button.classList.toggle('active', button.dataset.tab === tab);
+  });
+  const setupPanel = document.getElementById('setup-panel');
+  const candidatePanel = document.getElementById('candidate-panel');
+  const resumePanel = document.getElementById('resume-panel');
+  if (setupPanel) {
+    setupPanel.classList.toggle('legacy-hidden', tab !== 'setup');
+  }
+  if (candidatePanel) {
+    candidatePanel.classList.toggle('legacy-hidden', tab !== 'candidate');
+  }
+  if (resumePanel) {
+    resumePanel.classList.toggle('legacy-hidden', tab !== 'resume');
+  }
+}
+
+function setResumeMode(mode) {
+  resumeMode = mode;
+  document.getElementById('mode-upload-card').classList.toggle('active', mode === 'upload');
+  document.getElementById('mode-generate-card').classList.toggle('active', mode === 'generate');
+  document.getElementById('upload-mode-panel').classList.toggle('legacy-hidden', mode !== 'upload');
+  document.getElementById('generate-mode-panel').classList.toggle('legacy-hidden', mode !== 'generate');
+  refreshResumePreview();
+}
+
+function setProfileMode(mode) {
+  profileMode = mode;
+  const manualCard = document.getElementById('profile-manual-card');
+  const aiCard = document.getElementById('profile-ai-card');
+  if (manualCard) manualCard.classList.toggle('active', mode === 'manual');
+  if (aiCard) aiCard.classList.toggle('active', mode === 'ai');
+
+  const modeHidden = document.getElementById('profile_mode');
+  if (modeHidden) modeHidden.value = mode;
+
+  setProfileFieldsEditable(mode === 'ai');
+
+  // AI mode can auto-seed role-based content, manual mode leaves fields editable.
+  const selectedChip = document.querySelector('.role-chip.active') || document.querySelector('.role-chip[data-role="Java Developer + C2C"]');
+  if (mode === 'ai' && selectedChip) {
+    setTargetRole(selectedChip);
+  }
+  refreshResumePreview();
+}
+
+function setTargetRole(button) {
+  const targetRoleInput = document.getElementById('target_role');
+  const focusInput = document.getElementById('resume_focus');
+  const roleName = button.dataset.role || '';
+  const template = ROLE_TEMPLATES[roleName];
+  if (targetRoleInput) {
+    targetRoleInput.value = roleName;
+  }
+  if (focusInput && (template?.focus || button.dataset.focus)) {
+    focusInput.value = template?.focus || button.dataset.focus || '';
+  }
+
+  if (template && profileMode === 'ai') {
+    const skillsInput = document.getElementById('technical_skills');
+    const projectsInput = document.getElementById('projects');
+    if (skillsInput) {
+      skillsInput.value = template.skills.join(', ');
+    }
+    if (projectsInput) {
+      projectsInput.value = template.projects.map((project, index) => {
+        const lines = project.points.map((point) => `- ${point}`).join('\n');
+        return `${index + 1}. ${project.title}\n${lines}`;
+      }).join('\n\n');
+    }
+  }
+
+  const setupRolePreview = document.getElementById('setup-role-preview');
+  if (setupRolePreview) setupRolePreview.textContent = roleName;
+
+  document.querySelectorAll('.role-chip').forEach((chip) => {
+    chip.classList.toggle('active', chip === button);
+  });
+
+  refreshResumePreview();
+}
+
+function setProfileFieldsEditable(editable) {
+  const lockableSelectors = 'input:not(#profile_mode):not(#target_role), textarea, select, .role-chip';
+  ['candidate-panel', 'resume-panel'].forEach((panelId) => {
+    const panel = document.getElementById(panelId);
+    if (!panel) return;
+    panel.querySelectorAll(lockableSelectors).forEach((control) => {
+      if (control.classList.contains('role-chip')) {
+        control.disabled = !editable;
+      } else if (control.tagName === 'INPUT' || control.tagName === 'TEXTAREA' || control.tagName === 'SELECT') {
+        if (control.id !== 'file-input') {
+          if ('readOnly' in control && (control.tagName === 'INPUT' || control.tagName === 'TEXTAREA')) {
+            control.readOnly = !editable;
+          }
+          if (control.tagName === 'SELECT') {
+            control.disabled = !editable;
+          }
+          if (control.type === 'checkbox') {
+            control.disabled = !editable;
+          }
+        }
+      }
+      control.classList.toggle('field-locked', !editable);
+    });
+  });
+
+  ['profile-manual-card', 'profile-ai-card', 'mode-upload-card', 'mode-generate-card'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.classList.remove('field-locked');
+    }
+  });
+}
+
+function resetProfileFields() {
+  const defaults = {
+    name: 'Prashant Gupta',
+    target_role: 'Java Developer + C2C',
+    email: 'adityagupta983869@gmail.com',
+    phone: '+91-9838693305',
+    location: 'Ghaziabad, India',
+    linkedin_url: 'https://www.linkedin.com/in/prashant-gupta-9',
+    cover_text: 'I am interested in Java backend roles and can tailor my resume for the job description.',
+    technical_skills: '',
+    projects: '',
+    resume_focus: '',
+    resume_notes: 'Use the skills above as the baseline. Add my projects later when I share them.',
+  };
+  Object.entries(defaults).forEach(([id, value]) => {
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  });
+  resumePath = null;
+  profileMode = 'manual';
+  const uploadName = document.getElementById('upload-name');
+  if (uploadName) uploadName.textContent = 'No file selected yet';
+  const profileModeHidden = document.getElementById('profile_mode');
+  if (profileModeHidden) profileModeHidden.value = 'manual';
+  const aiEmail = document.getElementById('ai_tailor_email');
+  if (aiEmail) aiEmail.checked = true;
+  const aiResume = document.getElementById('ai_tailor_resume_pdf');
+  if (aiResume) aiResume.checked = true;
+  setProfileMode('manual');
+  setResumeMode('upload');
+  const defaultChip = document.querySelector('.role-chip[data-role="Java Developer + C2C"]');
+  if (defaultChip) {
+    setTargetRole(defaultChip);
+  }
+  refreshResumePreview();
+}
+
+async function generateResumeDraft() {
+  setResumeMode('generate');
+  const aiResumeEnabled = document.getElementById('ai_tailor_resume_pdf')?.checked ?? true;
+  const name = v('name') || 'Candidate';
+  const role = v('target_role') || 'Target Role';
+  const skills = v('technical_skills');
+  const projects = v('projects') || 'Add your project details later.';
+  const notes = v('resume_notes') || 'Resume draft ready.';
+  document.getElementById('preview-summary').textContent = [
+    `Generated resume draft for ${name} tailored to ${role}.`,
+    '',
+    `Skills baseline: ${skills || 'No skills entered yet.'}`,
+    '',
+    `Projects: ${projects}`,
+    '',
+    notes,
+  ].join('\n');
+  refreshResumePreview();
+
+  if (!aiResumeEnabled) {
+    document.getElementById('preview-summary').textContent = [
+      `Manual resume mode is active for ${role}.`,
+      resumePath ? `Using attached file: ${resumePath.split(/[\\/]/).pop()}` : 'No uploaded resume selected yet.',
+      '',
+      `Technical Skills: ${skills || 'No skills entered yet.'}`,
+      '',
+      `Projects: ${projects}`,
+    ].join('\n');
+    refreshResumePreview();
+    return;
+  }
+
+  const button = document.querySelector('#resume-panel .btn-primary');
+  const originalLabel = button ? button.textContent : '';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Generating PDF…';
+  }
+
+  try {
+    const payload = buildPayload();
+    const res = await fetch(`${API}/api/generate-resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (data.path) {
+      resumePath = data.path;
+      const uploadName = document.getElementById('upload-name');
+      if (uploadName) {
+        uploadName.textContent = `✓ ${data.filename || 'generated resume.pdf'}`;
+        uploadName.style.color = 'var(--success)';
+      }
+      document.getElementById('preview-summary').textContent = [
+        `Generated PDF ready for ${role}.`,
+        `Saved at: ${data.filename || data.path}`,
+        '',
+        `Technical Skills: ${skills || 'No skills entered yet.'}`,
+        '',
+        `Projects: ${projects}`,
+      ].join('\n');
+      refreshResumePreview();
+    }
+  } catch (err) {
+    document.getElementById('preview-summary').textContent = `Resume generation failed: ${err.message}`;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalLabel || '✨ Generate Resume PDF';
+    }
+  }
+}
+
+function refreshResumePreview() {
+  const name = v('name') || 'Prashant Gupta';
+  const role = v('target_role') || 'Java Developer + C2C';
+  const email = v('email') || 'adityagupta983869@gmail.com';
+  const phone = v('phone') || '+91-9838693305';
+  const location = v('location') || 'Ghaziabad, India';
+  const skillsRaw = v('technical_skills') || 'Java, Spring Boot, Hibernate/JPA, REST APIs';
+  const skills = skillsRaw.split(',').map((item) => item.trim()).filter(Boolean).slice(0, 7);
+  const modeLabel = resumeMode === 'upload' ? 'Self attach mode' : 'Generated resume mode';
+  const profileLabel = profileMode === 'manual' ? 'Manual profile mode' : 'AI profile mode';
+  const fileLabel = resumePath ? `Resume file: ${resumePath.split(/[\\/]/).pop()}` : 'No uploaded resume yet';
+
+  document.getElementById('preview-name').textContent = name;
+  document.getElementById('preview-role').textContent = role;
+  document.getElementById('preview-contact').textContent = `${phone} · ${email}`;
+  document.getElementById('preview-location').textContent = location;
+
+  const skillList = document.getElementById('skills-pill-list');
+  skillList.innerHTML = skills.length
+    ? skills.map((skill) => `<span class="preview-pill">${escHtml(skill)}</span>`).join('')
+    : '<span class="preview-pill">Add skills</span>';
+
+  const summaryLines = [
+    `${modeLabel}.`,
+    profileLabel,
+    fileLabel,
+    '',
+    `Target role: ${role}`,
+    `Key skills: ${skillsRaw || 'Add technical skills'}`,
+    '',
+    `Projects: ${v('projects') || 'Add project details later.'}`,
+  ];
+  const previewSummary = document.getElementById('preview-summary');
+  if (previewSummary && resumeMode === 'upload') {
+    previewSummary.textContent = summaryLines.join('\n');
+  }
+
+  const setupRolePreview = document.getElementById('setup-role-preview');
+  if (setupRolePreview) {
+    setupRolePreview.textContent = role;
+  }
+
+  const aiTailorEmail = document.getElementById('ai_tailor_email');
+  const aiTailorResume = document.getElementById('ai_tailor_resume_pdf');
+  const profileModeInput = document.getElementById('profile_mode');
+  if (profileModeInput) profileModeInput.value = profileMode;
+  if (previewSummary && (aiTailorEmail || aiTailorResume)) {
+    const extraNotes = [];
+    if (aiTailorEmail && !aiTailorEmail.checked) {
+      extraNotes.push('Email pitch will stay manual.');
+    }
+    if (aiTailorResume && !aiTailorResume.checked) {
+      extraNotes.push('Resume generation will use the attached file.');
+    }
+    if (extraNotes.length) {
+      previewSummary.textContent = [previewSummary.textContent.trim(), ...extraNotes].join('\n');
+    }
+  }
+}
+
+function syncRoleSelectionFromInput() {
+  const currentRole = v('target_role');
+  const roleChip = Array.from(document.querySelectorAll('.role-chip')).find((chip) => (chip.dataset.role || '') === currentRole);
+  if (roleChip) {
+    document.querySelectorAll('.role-chip').forEach((chip) => {
+      chip.classList.toggle('active', chip === roleChip);
+    });
+  } else {
+    const defaultChip = document.querySelector('.role-chip[data-role="Java Developer + C2C"]');
+    if (defaultChip) {
+      setTargetRole(defaultChip);
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   FORM VALIDATION
+   ═══════════════════════════════════════════════════════════════════════════ */
+function validateForm() {
+  const kw  = v('keywords');
+  const su  = v('search_url');
+  const ju  = v('job_url');
+
+  // Clear previous errors
+  ['keywords', 'search_url', 'job_url'].forEach(id => {
+    document.getElementById(id).classList.remove('error');
+  });
+
+  if (!kw && !su && !ju) {
+    ['keywords', 'search_url', 'job_url'].forEach(id => {
+      document.getElementById(id).classList.add('error');
+    });
+    logLine('error', 'Please provide at least one of: Keywords, Search URL, or Job URL.');
+    return false;
+  }
+  return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BUILD PAYLOAD
+   ═══════════════════════════════════════════════════════════════════════════ */
+function buildPayload() {
+  // Parse locations
+  const locationsRaw = v('locations');
+  const locations = locationsRaw
+    ? locationsRaw.split(',').map(s => s.trim()).filter(Boolean)
+    : [];
+
+  return {
+    keywords:   v('keywords')   || null,
+    search_url: v('search_url') || null,
+    job_url:    v('job_url')    || null,
+    max_jobs:   parseInt(v('max_jobs')) || 5,
+    headless:   !document.getElementById('headless').checked,
+    login_credentials: {
+      linkedin_email:    v('linkedin_email')    || null,
+      linkedin_password: v('linkedin_password') || null,
+      gmail_address:     v('gmail_address')     || null,
+      gmail_app_password: v('gmail_app_password') || null,
+    },
+    candidate: {
+      name:         v('name'),
+      target_role:   v('target_role'),
+      email:        v('email'),
+      phone:        v('phone'),
+      cover_text:   v('cover_text'),
+      technical_skills: v('technical_skills'),
+      projects:     v('projects'),
+      resume_mode:  resumeMode,
+      profile_mode: profileMode,
+      ai_tailor_email: document.getElementById('ai_tailor_email')?.checked ?? true,
+      ai_tailor_resume_pdf: document.getElementById('ai_tailor_resume_pdf')?.checked ?? true,
+      location:     v('location')     || null,
+      linkedin_url: v('linkedin_url') || null,
+      resume_path:  resumePath,
+    },
+    filters: {
+      posted_within_hours: parseInt(document.getElementById('posted_within_hours').value) || 24,
+      locations:           locations,
+      easy_apply_only:     document.getElementById('easy_apply_only').checked,
+      remote_only:         document.getElementById('remote_only').checked,
+      extra_params: {
+        search_in: v('search_in') || 'linkedin_jobs',
+      },
+    },
+  };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   START / STOP
+   ═══════════════════════════════════════════════════════════════════════════ */
+async function startRun() {
+  if (isRunning) return;
+
+  if (!validateForm()) return;
+
+  const payload = buildPayload();
+
+  // Reset counters & switch UI panels
+  resetRunUI();
+  document.getElementById('run-panel').style.display = 'block';
+  document.getElementById('idle-panel').style.display = 'none';
+  setRunning(true);
+
+  abortCtrl = new AbortController();
+
+  try {
+    const res = await fetch(`${API}/api/linkedin/auto-apply`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload),
+      signal:  abortCtrl.signal,
+    });
+
+    if (!res.ok) {
+      let errMsg = `Server error ${res.status}`;
+      try {
+        const err = await res.json();
+        errMsg += `: ${err.detail || JSON.stringify(err)}`;
+      } catch {}
+      logLine('error', errMsg);
+      setRunning(false);
+      return;
+    }
+
+    // Read SSE stream
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let   buffer  = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep incomplete line
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try { handleEvent(JSON.parse(line.slice(6))); }
+          catch { /* malformed line — skip */ }
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      logLine('error', `Connection error: ${err.message}`);
+    }
+  } finally {
+    setRunning(false);
+  }
+}
+
+function stopRun() {
+  if (abortCtrl) {
+    abortCtrl.abort();
+    logLine('warn', 'Run aborted by user.');
+  }
+  setRunning(false);
+}
+
+function setRunning(running) {
+  isRunning = running;
+  const startBtn    = document.getElementById('start-btn');
+  const stopBtn     = document.getElementById('stop-btn');
+  const btmStart    = document.getElementById('bottom-start-btn');
+  const btmStop     = document.getElementById('bottom-stop-btn');
+  const spinner     = document.getElementById('start-spinner');
+  const btnText     = document.getElementById('start-btn-text');
+
+  startBtn.disabled = running;
+  stopBtn.disabled  = !running;
+  btmStart.disabled = running;
+  btmStop.disabled  = !running;
+
+  if (running) {
+    spinner.classList.add('active');
+    btnText.textContent = 'Running…';
+  } else {
+    spinner.classList.remove('active');
+    btnText.textContent = '▶ Start Automation';
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SSE EVENT HANDLER
+   ═══════════════════════════════════════════════════════════════════════════ */
+function handleEvent(evt) {
+  switch (evt.type) {
+
+    case 'log':
+      logLine(evt.level || 'info', evt.message);
+      break;
+
+    case 'manual_login_required':
+      document.getElementById('manual-alert').classList.add('visible');
+      logLine('warn', evt.message || 'Manual login required — check browser window.');
+      break;
+
+    case 'job_start':
+      totalJobs = evt.total || totalJobs;
+      document.getElementById('s-total').textContent = totalJobs;
+      updatePills();
+      logLine('system', `[${evt.index}/${evt.total}] Opening job…`);
+      break;
+
+    case 'job_result': {
+      const j = evt.job;
+      processed++;
+      if (j.status === 'applied')  counts.applied++;
+      if (j.status === 'skipped')  counts.skipped++;
+      if (j.status === 'failed')   counts.failed++;
+      updateStats();
+      updateProgress();
+      updatePills();
+      addJobCard(j);
+      break;
+    }
+
+    case 'summary':
+      // Final summary from orchestrator
+      totalJobs = evt.total || totalJobs;
+      counts.applied = evt.applied || counts.applied;
+      counts.skipped = evt.skipped || counts.skipped;
+      counts.failed  = evt.failed  || counts.failed;
+      updateStats();
+      updatePills();
+      break;
+
+    case 'error':
+      logLine('error', evt.message);
+      break;
+
+    case 'done':
+      document.getElementById('manual-alert').classList.remove('visible');
+      logLine('success', '✓ Run complete!');
+      setProgress(100);
+      updatePills();
+      break;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UI HELPERS
+   ═══════════════════════════════════════════════════════════════════════════ */
+function logLine(level, msg) {
+  const el  = document.getElementById('log-console');
+  const now = new Date().toLocaleTimeString('en-GB', { hour12: false });
+  const div = document.createElement('div');
+  div.className = `log-line ${level}`;
+  div.innerHTML = `<span class="ts">${now}</span><span class="msg">${escHtml(msg)}</span>`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function addJobCard(j) {
+  const list  = document.getElementById('job-list');
+  const empty = document.getElementById('job-list-empty');
+  if (empty) empty.remove();
+
+  const icons = { applied: '✅', skipped: '⏭️', failed: '❌', pending: '⏳' };
+  const card  = document.createElement('div');
+  card.className = 'job-card';
+
+  let meta = '';
+  if (j.filled_fields) {
+    meta += `<span class="success-text">${j.filled_fields} fields filled</span>`;
+  }
+  if (j.error) {
+    meta += `${meta ? ' · ' : ''}<span class="danger-text">${escHtml(j.error)}</span>`;
+  }
+  if (j.diagnostics_dir) {
+    meta += `${meta ? ' · ' : ''}<a href="#" onclick="toggleDiagnostics();return false;">diagnostics</a>`;
+  }
+
+  card.innerHTML = `
+    <div class="job-icon">${icons[j.status] || '⏳'}</div>
+    <div class="job-info">
+      <div class="job-title">${escHtml(j.title || 'Untitled')}</div>
+      <div class="job-company">${escHtml(j.company || 'Unknown company')}</div>
+      ${meta ? `<div class="job-meta">${meta}</div>` : ''}
+    </div>
+    <div class="job-badge ${j.status}">${j.status}</div>`;
+  list.appendChild(card);
+}
+
+function updateStats() {
+  document.getElementById('s-applied').textContent = counts.applied;
+  document.getElementById('s-skipped').textContent = counts.skipped;
+  document.getElementById('s-failed').textContent  = counts.failed;
+  document.getElementById('s-total').textContent   = totalJobs || (counts.applied + counts.skipped + counts.failed);
+}
+
+function updateProgress() {
+  if (!totalJobs) return;
+  setProgress(Math.round((processed / totalJobs) * 100));
+}
+
+function setProgress(pct) {
+  document.getElementById('progress-bar').style.width = pct + '%';
+}
+
+function updatePills() {
+  const total = totalJobs || (counts.applied + counts.skipped + counts.failed);
+  document.getElementById('jobs-found-pill').textContent  = `${total} JOBS`;
+
+  const pct = totalJobs ? Math.round((processed / totalJobs) * 100) : 0;
+  document.getElementById('progress-pill').textContent = `${pct}% DONE`;
+}
+
+function resetRunUI() {
+  processed = 0;
+  totalJobs = 0;
+  counts    = { applied: 0, skipped: 0, failed: 0 };
+  updateStats();
+  setProgress(0);
+  updatePills();
+  document.getElementById('log-console').innerHTML = '';
+  document.getElementById('job-list').innerHTML =
+    '<div class="empty-state" id="job-list-empty"><div class="empty-icon">📭</div><div>Results will appear here as jobs are processed…</div></div>';
+  document.getElementById('manual-alert').classList.remove('visible');
+  document.getElementById('s-total').textContent = '0';
+
+  // Restore panel visibility
+  document.getElementById('run-panel').style.display = 'none';
+  document.getElementById('idle-panel').style.display = '';
+  document.getElementById('diag-panel').style.display = 'none';
+
+  // Clear validation errors
+  ['keywords', 'search_url', 'job_url'].forEach(id => {
+    document.getElementById(id).classList.remove('error');
+  });
+
+  setRunning(false);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DIAGNOSTICS
+   ═══════════════════════════════════════════════════════════════════════════ */
+async function toggleDiagnostics() {
+  const panel = document.getElementById('diag-panel');
+  if (panel.style.display === 'block') {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+  await loadDiagnostics();
+}
+
+async function loadDiagnostics() {
+  const list = document.getElementById('diag-list');
+  list.innerHTML = '<li style="color:var(--text-muted);cursor:default">Loading…</li>';
+  document.getElementById('diag-detail').innerHTML = '';
+
+  try {
+    const res  = await fetch(`${API}/api/diagnostics`);
+    const data = await res.json();
+    if (!data.directories || !data.directories.length) {
+      list.innerHTML = '<li style="color:var(--text-muted);cursor:default">No diagnostics captured yet.</li>';
+      return;
+    }
+    list.innerHTML = data.directories.map(d =>
+      `<li onclick="openDiagDir('${escHtml(d)}')"><span class="diag-icon">📁</span> ${escHtml(d)}</li>`
+    ).join('');
+  } catch (err) {
+    list.innerHTML = `<li style="color:var(--danger);cursor:default">Error: ${escHtml(err.message)}</li>`;
+  }
+}
+
+async function openDiagDir(name) {
+  const detail = document.getElementById('diag-detail');
+  detail.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:.5rem">Loading files…</div>';
+
+  try {
+    const res  = await fetch(`${API}/api/diagnostics/${encodeURIComponent(name)}`);
+    const data = await res.json();
+
+    let html = `<div class="diag-files"><strong style="color:var(--text-secondary)">${escHtml(name)}</strong><hr class="section-divider">`;
+    for (const file of data.files) {
+      const url = `${API}/api/diagnostics/${encodeURIComponent(name)}/${encodeURIComponent(file)}`;
+      const icon = file.endsWith('.png') ? '🖼️' : file.endsWith('.json') ? '📄' : file.endsWith('.html') ? '🌐' : '📎';
+      html += `<a href="${url}" target="_blank" rel="noopener">${icon} ${escHtml(file)}</a>`;
+    }
+    html += '</div>';
+    detail.innerHTML = html;
+  } catch (err) {
+    detail.innerHTML = `<div style="color:var(--danger);font-size:12px;padding:.5rem">Error: ${escHtml(err.message)}</div>`;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UTILITIES
+   ═══════════════════════════════════════════════════════════════════════════ */
+function v(id) {
+  return document.getElementById(id)?.value?.trim() || '';
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+</script>
+</body>
+</html>
