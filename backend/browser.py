@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -25,15 +26,26 @@ from playwright.async_api import (
     Playwright,
 )
 
-from config import (
-    BROWSER_TIMEZONE,
-    DIAGNOSTICS_DIR,
-    HEADLESS,
-    MAX_DELAY,
-    MIN_DELAY,
-    SESSION_PATH,
-    USER_AGENT,
-)
+try:
+    from .config import (
+        BROWSER_TIMEZONE,
+        DIAGNOSTICS_DIR,
+        HEADLESS,
+        MAX_DELAY,
+        MIN_DELAY,
+        SESSION_PATH,
+        USER_AGENT,
+    )
+except ImportError:
+    from config import (
+        BROWSER_TIMEZONE,
+        DIAGNOSTICS_DIR,
+        HEADLESS,
+        MAX_DELAY,
+        MIN_DELAY,
+        SESSION_PATH,
+        USER_AGENT,
+    )
 
 
 # ── Anti-detection JS injected into every page before scripts run ─────────────
@@ -54,6 +66,41 @@ async def human_delay(min_s: float = MIN_DELAY, max_s: float = MAX_DELAY) -> Non
     await asyncio.sleep(random.uniform(min_s, max_s))
 
 
+async def goto_with_retries(
+    page: Page,
+    url: str,
+    *,
+    timeout: int,
+    wait_until: str = "domcontentloaded",
+    attempts: int = 3,
+    retry_delay_s: float = 15.0,
+) -> None:
+    """Navigate with bounded retries for transient network failures."""
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            await page.goto(url, timeout=timeout, wait_until=wait_until)
+            return
+        except Exception as exc:
+            last_exc = exc
+            message = str(exc)
+            if "ERR_ABORTED" in message.upper():
+                try:
+                    current_url = page.url or ""
+                except Exception:
+                    current_url = ""
+                if current_url and urlparse(current_url).netloc == urlparse(url).netloc:
+                    logger.warning(f"Navigation aborted but page landed on the same host for {url}: {current_url}")
+                    return
+            if attempt >= attempts:
+                break
+            logger.warning(f"Navigation attempt {attempt}/{attempts} failed for {url}: {exc}")
+            await asyncio.sleep(retry_delay_s)
+
+    if last_exc:
+        raise last_exc
+
+
 async def build_context(
     playwright: Playwright,
     headless: bool = HEADLESS,
@@ -72,15 +119,20 @@ async def build_context(
     """
     har_path = str(DIAGNOSTICS_DIR / "session.har") if record_har else ""
 
-    logger.info(f"Launching Chromium (headless={headless})")
+    logger.info(f"Launching Chrome (headless=False)")
     try:
         browser = await playwright.chromium.launch(
-            headless=headless,
+            channel="chrome",
+            headless=False,
             args=[
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--allow-running-insecure-content",
+                "--disable-web-security",
             ],
+            ignore_default_args=["--enable-automation", "--no-sandbox"],
         )
     except Exception as exc:
         logger.error(f"Chromium launch failed: {exc}")
@@ -91,6 +143,18 @@ async def build_context(
         viewport={"width": 1440, "height": 900},
         locale="en-US",
         timezone_id=BROWSER_TIMEZONE,
+        extra_http_headers={
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "sec-ch-ua": '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Upgrade-Insecure-Requests": "1"
+        }
     )
 
     if har_path:
@@ -139,3 +203,13 @@ def _attach_console(page: Page, buf: List[Dict[str, Any]]) -> None:
         "pageerror",
         lambda err: buf.append({"type": "pageerror", "text": str(err)}),
     )
+
+
+async def new_stealth_page(context):
+    page = await context.new_page()
+    try:
+        from playwright_stealth import stealth_async
+        await stealth_async(page)
+    except ImportError:
+        pass
+    return page

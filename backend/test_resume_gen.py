@@ -15,6 +15,8 @@ cand = CandidateProfile(
     projects='Employee Management System\nOnline Banking System\nJob Portal Backend API'
 )
 
-path = resume_generator.generate_resume(cand, str(out))
+import asyncio
+
+path = asyncio.run(resume_generator.generate_resume(cand, str(out)))
 print('Generated:', path)
 print('Size:', out.stat().st_size)

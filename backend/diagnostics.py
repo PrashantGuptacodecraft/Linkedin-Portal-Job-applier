@@ -16,7 +16,10 @@ from typing import Any, Dict, List
 from loguru import logger
 from playwright.async_api import Page
 
-from config import DIAGNOSTICS_DIR
+try:
+    from .config import DIAGNOSTICS_DIR
+except ImportError:
+    from config import DIAGNOSTICS_DIR
 
 
 class DiagnosticsCapture:

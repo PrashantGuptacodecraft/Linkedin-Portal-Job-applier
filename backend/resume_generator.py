@@ -16,7 +16,10 @@ from typing import Dict, List
 
 from playwright.async_api import async_playwright
 
-from models import CandidateProfile
+try:
+    from .models import CandidateProfile
+except ImportError:
+    from models import CandidateProfile
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from pypdf import PdfReader, PdfWriter
@@ -341,55 +344,181 @@ async def generate_resume_pdf(candidate: CandidateProfile, output_path: str) -> 
 def _draw_overlay_pdf(candidate: CandidateProfile) -> bytes:
     """Create a transparent overlay PDF placing text at fixed coordinates.
 
+    First draws white rectangles to blank out the template's dynamic content
+    areas, then draws the candidate's information in the cleared zones.
     Coordinates are in points with origin at bottom-left. We target A4.
-    This overlay will be merged on top of the template PDF to place dynamic
-    text into the template's reserved spaces.
     """
     buffer = io.BytesIO()
-    width, height = A4  # points
+    width, height = A4  # 595.27 x 841.89 points
     c = canvas.Canvas(buffer, pagesize=A4)
 
-    name = candidate.name or ""
-    headline = (candidate.target_role or "").upper()
-    contact = ", ".join(filter(None, [candidate.phone or "", candidate.email or ""]))
+    # ── Resolve role template ────────────────────────────────────────────
+    role_key = normalize_role(candidate.target_role)
+    template = ROLE_TEMPLATES.get(role_key, ROLE_TEMPLATES["java developer + c2c"])
+
+    name = candidate.name or "Prashant Gupta"
+    headline = (candidate.target_role or str(template["headline"])).upper()
+    email = candidate.email or ""
+    phone = candidate.phone or ""
     location = candidate.location or ""
-    skills = candidate.technical_skills or ""
-    projects = candidate.projects or ""
+    linkedin = candidate.linkedin_url or ""
+    summary = str(template["summary"])
 
-    # Place name near top-left region of template
-    c.setFont("Helvetica-Bold", 20)
-    c.setFillColorRGB(0.06, 0.06, 0.06)
-    c.drawString(48, height - 96, name)
+    # Skills
+    skills_raw = candidate.technical_skills or ""
+    skills_list = _dedupe(
+        _split_lines(skills_raw.replace(",", "\n"))
+    ) or list(template["skills"])
 
-    # Headline / target role under name
+    # Projects
+    project_text = _split_lines(candidate.projects)
+    if project_text and len(project_text) >= 3:
+        role_projects = [
+            {"title": t, "points": ["Role-tailored feature", "Customized implementation"]}
+            for t in project_text[:3]
+        ]
+    else:
+        role_projects = template["projects"]
+
+    # Contact line
+    contact_parts = [p for p in [phone, email] if p]
+    contact_line = "  |  ".join(contact_parts)
+    location_line = "  |  ".join([p for p in [location, linkedin] if p])
+
+    # ── Zone definitions (x, y_top, w, h) – areas to blank with white ────
+    # Header zone: name, headline, contact (top ~80pt of page)
+    header_zone = (0, height - 130, width, 130)
+    # Skills zone: below header, above projects
+    skills_zone = (30, height - 310, width - 60, 150)
+    # Projects zone: main body area
+    projects_zone = (30, height - 660, width - 60, 350)
+
+    # ── Step 1: Blank the dynamic zones with white ───────────────────────
+    c.setFillColorRGB(1, 1, 1)  # white
+    for (x, y, w, h) in [header_zone, skills_zone, projects_zone]:
+        c.rect(x, y, w, h, fill=1, stroke=0)
+
+    # ── Step 2: Draw the header ──────────────────────────────────────────
+    # Background gradient effect (dark blue header)
+    c.setFillColorRGB(0.059, 0.090, 0.165)  # #0f172a dark navy
+    c.rect(0, height - 120, width, 120, fill=1, stroke=0)
+
+    # Name
+    c.setFont("Helvetica-Bold", 22)
+    c.setFillColorRGB(1, 1, 1)
+    c.drawString(40, height - 42, name)
+
+    # Headline / target role
     c.setFont("Helvetica", 11)
-    c.setFillColorRGB(0.17, 0.38, 0.89)
-    c.drawString(48, height - 118, headline)
+    c.setFillColorRGB(0.85, 0.90, 1.0)
+    c.drawString(40, height - 62, headline)
 
-    # Contact block on right side of header
+    # Contact info
     c.setFont("Helvetica", 9)
-    c.setFillColorRGB(0.13, 0.13, 0.13)
-    c.drawRightString(width - 48, height - 90, contact)
-    c.drawRightString(width - 48, height - 106, location)
+    c.setFillColorRGB(0.8, 0.85, 0.95)
+    c.drawString(40, height - 82, contact_line)
+    if location_line:
+        c.drawString(40, height - 96, location_line)
 
-    # Skills pill area — render as wrapped lines starting beneath header
+    # ── Step 3: Professional Summary ─────────────────────────────────────
+    y_cursor = height - 150
+
+    c.setFont("Helvetica-Bold", 11)
+    c.setFillColorRGB(0.11, 0.31, 0.83)  # #1d4ed8 blue
+    c.drawString(40, y_cursor, "PROFESSIONAL SUMMARY")
+    y_cursor -= 18
+
     c.setFont("Helvetica", 9)
-    y = height - 150
-    max_width = width - 96
-    for line in skills.split("\n")[:6]:
-        if not line.strip():
-            continue
-        c.drawString(48, y, line.strip())
-        y -= 14
+    c.setFillColorRGB(0.2, 0.25, 0.33)
+    # Wrap the summary text
+    max_line_width = width - 80
+    words = summary.split()
+    line = ""
+    for word in words:
+        test_line = f"{line} {word}".strip()
+        if c.stringWidth(test_line, "Helvetica", 9) < max_line_width:
+            line = test_line
+        else:
+            c.drawString(40, y_cursor, line)
+            y_cursor -= 14
+            line = word
+    if line:
+        c.drawString(40, y_cursor, line)
+        y_cursor -= 14
 
-    # Projects — place in main body left column
-    c.setFont("Helvetica-Bold", 10)
-    y = height - 300
-    for block in (projects.split("\n") if projects else [])[:3]:
-        if not block.strip():
-            continue
-        c.drawString(48, y, block.strip())
-        y -= 14
+    # ── Step 4: Technical Skills ─────────────────────────────────────────
+    y_cursor -= 10
+
+    c.setFont("Helvetica-Bold", 11)
+    c.setFillColorRGB(0.11, 0.31, 0.83)
+    c.drawString(40, y_cursor, "TECHNICAL SKILLS")
+    y_cursor -= 18
+
+    # Render skills as pills/tags in a wrapped row
+    c.setFont("Helvetica-Bold", 8)
+    x_cursor = 40
+    pill_height = 16
+    pill_padding = 8
+    pill_gap = 6
+    row_gap = 6
+
+    for skill in skills_list:
+        text_width = c.stringWidth(skill, "Helvetica-Bold", 8)
+        pill_width = text_width + pill_padding * 2
+
+        # Check if we need to wrap to next line
+        if x_cursor + pill_width > width - 40:
+            x_cursor = 40
+            y_cursor -= pill_height + row_gap
+
+        # Draw pill background
+        c.setFillColorRGB(0.94, 0.96, 1.0)  # #eff6ff light blue bg
+        c.roundRect(x_cursor, y_cursor - 4, pill_width, pill_height, 8, fill=1, stroke=0)
+
+        # Draw pill border
+        c.setStrokeColorRGB(0.75, 0.86, 0.99)  # #bfdbfe
+        c.setLineWidth(0.5)
+        c.roundRect(x_cursor, y_cursor - 4, pill_width, pill_height, 8, fill=0, stroke=1)
+
+        # Draw skill text
+        c.setFillColorRGB(0.11, 0.31, 0.83)
+        c.drawString(x_cursor + pill_padding, y_cursor, skill)
+
+        x_cursor += pill_width + pill_gap
+
+    y_cursor -= pill_height + 20
+
+    # ── Step 5: Projects ─────────────────────────────────────────────────
+    c.setFont("Helvetica-Bold", 11)
+    c.setFillColorRGB(0.11, 0.31, 0.83)
+    c.drawString(40, y_cursor, "PROJECTS")
+    y_cursor -= 18
+
+    for proj in role_projects[:3]:
+        if y_cursor < 80:
+            break  # don't overflow the page
+
+        # Project title
+        c.setFont("Helvetica-Bold", 10)
+        c.setFillColorRGB(0.06, 0.09, 0.16)
+        c.drawString(48, y_cursor, str(proj["title"]))
+        y_cursor -= 16
+
+        # Project bullet points
+        c.setFont("Helvetica", 9)
+        c.setFillColorRGB(0.28, 0.33, 0.42)
+        for point in proj["points"][:4]:
+            if y_cursor < 60:
+                break
+            c.drawString(58, y_cursor, f"•  {point}")
+            y_cursor -= 13
+
+        y_cursor -= 8  # gap between projects
+
+    # ── Footer note ──────────────────────────────────────────────────────
+    c.setFont("Helvetica", 7)
+    c.setFillColorRGB(0.39, 0.45, 0.55)
+    c.drawString(40, 30, "Generated resume — tailored from the selected role and candidate profile.")
 
     c.showPage()
     c.save()
@@ -397,7 +526,7 @@ def _draw_overlay_pdf(candidate: CandidateProfile) -> bytes:
     return buffer.read()
 
 
-def generate_resume_using_template(candidate: CandidateProfile, output_path: str) -> str:
+async def generate_resume_using_template(candidate: CandidateProfile, output_path: str) -> str:
     """Generate a PDF by merging a filled transparent overlay onto the
     `data/harshibar_s_resume__2_.pdf` template. Falls back to HTML-rendered
     resume when template or libraries are not available.
@@ -405,9 +534,7 @@ def generate_resume_using_template(candidate: CandidateProfile, output_path: str
     tpl_path = Path(__file__).resolve().parents[1] / "data" / "harshibar_s_resume__2_.pdf"
     if not tpl_path.exists():
         # fallback to Playwright-rendered HTML
-        import asyncio
-
-        return asyncio.get_event_loop().run_until_complete(generate_resume_pdf(candidate, output_path))
+        return await generate_resume_pdf(candidate, output_path)
 
     overlay_bytes = _draw_overlay_pdf(candidate)
 
@@ -426,11 +553,9 @@ def generate_resume_using_template(candidate: CandidateProfile, output_path: str
     return output_path
 
 
-def generate_resume(candidate: CandidateProfile, output_path: str) -> str:
+async def generate_resume(candidate: CandidateProfile, output_path: str) -> str:
     """Public entry: prefer template merge, fallback to HTML-rendered PDF."""
     try:
-        return generate_resume_using_template(candidate, output_path)
+        return await generate_resume_using_template(candidate, output_path)
     except Exception:
-        import asyncio
-
-        return asyncio.get_event_loop().run_until_complete(generate_resume_pdf(candidate, output_path))
+        return await generate_resume_pdf(candidate, output_path)

@@ -21,12 +21,46 @@ import asyncio
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import asyncio
+from loguru import logger
+import time
+
+async def _call_gemini_with_retry(client, prompt: str, retries: int = 4) -> Any:
+    """Wrapper around Gemini API calls to handle 429 Rate Limit and 503 errors."""
+    for attempt in range(retries):
+        try:
+            if hasattr(client, 'generate_content_async'):
+                response = await client.generate_content_async(prompt)
+            else:
+                loop = asyncio.get_running_loop()
+                response = await loop.run_in_executor(None, client.generate_content, prompt)
+            return response
+        except Exception as e:
+            err_str = str(e)
+            if attempt < retries - 1:
+                wait_time = 5.0
+                if "429" in err_str or "Quota exceeded" in err_str:
+                    wait_time = 40.0
+                    import re
+                    match = re.search(r'retry in ([0-9.]+)s', err_str)
+                    if match:
+                        wait_time = float(match.group(1)) + 1.0
+                logger.warning(f"Gemini API Error: {err_str[:100]}... Waiting {wait_time:.1f}s before retry {attempt+1}/{retries}...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error("Gemini API max retries exceeded.")
+                raise e
+
 
 from loguru import logger
 from playwright.async_api import BrowserContext, Page, TimeoutError as PWTimeout
 
-from browser import human_delay
-from models import CandidateProfile
+try:
+    from .browser import goto_with_retries, human_delay
+    from .models import CandidateProfile
+except ImportError:
+    from browser import goto_with_retries, human_delay
+    from models import CandidateProfile
 
 
 # ── Portal fingerprint registry ───────────────────────────────────────────────
@@ -45,46 +79,259 @@ def _register(pattern: str):
 # ── Public entry-point ────────────────────────────────────────────────────────
 
 async def autofill_portal_form(
-    context:   BrowserContext,
-    apply_url: str,
+    context: BrowserContext,
+    apply_target: Any,
     candidate: CandidateProfile,
+    login_credentials: Optional[Any] = None,
+    emit: Optional[Any] = None,
 ) -> Tuple[Page, int, Optional[str]]:
     """
-    Open *apply_url* in a new tab, autofill the application form, and
+    Open *apply_target* (URL or Page), autofill the application form, and
     attempt to upload the resume.
-
-    Returns (page, filled_field_count, portal_state).
-    The caller is responsible for closing the page after saving diagnostics.
     """
-    page = await context.new_page()
+    import urllib.parse
+    from .config import SKIP_DOMAINS, DomainSkippedError
     try:
-        await page.goto(apply_url, timeout=35_000, wait_until="domcontentloaded")
+        from playwright_stealth import stealth_async
+    except ImportError:
+        stealth_async = None
+
+    # Check SKIP_DOMAINS
+    target_url = getattr(apply_target, 'url', str(apply_target))
+    try:
+        domain = urllib.parse.urlparse(target_url).netloc
+        if not domain:
+            domain = target_url
+    except Exception:
+        domain = ""
+    for skip_d in SKIP_DOMAINS:
+        if skip_d in domain:
+            raise DomainSkippedError("Domain in skip list — Cloudflare protected")
+
+    page = None
+    created_new_page = False
+    try:
+        if hasattr(apply_target, 'url') and getattr(apply_target, 'goto', None):
+            page = apply_target
+        else:
+            page = await context.new_page()
+            created_new_page = True
+            if stealth_async:
+                await stealth_async(page)
+            try:
+                await goto_with_retries(page, str(apply_target), timeout=35_000)
+            except Exception:
+                pass
         await human_delay(2.5, 4.0)
+        apply_url = str(page.url or '')
+        url_l = (page.url or "").lower()
+        if "linkedin.com" in url_l and ("/safety/" in url_l or "safety/go" in url_l or "checkpoint" in url_l):
+            try:
+                followed = await _follow_linkedin_interstitial(page)
+                if followed:
+                    logger.info(f"Followed LinkedIn interstitial to external URL: {page.url}")
+            except Exception as exc:
+                logger.debug(f"Error following LinkedIn interstitial: {exc}")
+                
+        # ── Cloudflare Detect & Wait ─────────────────────────────────────────
+        try:
+            curr_title = (await page.title()).lower()
+            curr_url = (page.url or "").lower()
+            curr_html = (await page.content()).lower()
+            if ("just a moment" in curr_title or 
+                "verifying you are human" in curr_title or 
+                "challenge" in curr_url or 
+                "cf-turnstile" in curr_html or 
+                "ray id" in curr_html):
+                
+                logger.info("Cloudflare detected — waiting for auto-resolution")
+                if emit:
+                    emit({"type": "log", "level": "info", "message": "Cloudflare detected — waiting for auto-resolution (up to 30s)..."})
+                
+                try:
+                    await page.wait_for_function("document.title !== 'Just a moment...'", timeout=30000)
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+                
+                # Check if still blocked
+                curr_title = (await page.title()).lower()
+                curr_html = (await page.content()).lower()
+                if "just a moment" in curr_title or "verifying you are human" in curr_title or "cf-turnstile" in curr_html:
+                    logger.info("Cloudflare did not auto-resolve. Attempting to click Turnstile iframe.")
+                    try:
+                        # Attempt to find Turnstile iframe and click center
+                        iframe_el = await page.query_selector("iframe[src*='challenges.cloudflare.com']")
+                        if not iframe_el:
+                            iframe_el = await page.query_selector("iframe[title*='widget']")
+                        if iframe_el:
+                            box = await iframe_el.bounding_box()
+                            if box:
+                                await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                                await human_delay(4.0, 6.0)
+                    except Exception as e:
+                        logger.debug(f"Failed to click turnstile: {e}")
+                        
+                # Final check after click
+                curr_title = (await page.title()).lower()
+                curr_html = (await page.content()).lower()
+                if "just a moment" in curr_title or "verifying you are human" in curr_title or "cf-turnstile" in curr_html:
+                    if emit:
+                        emit({"type": "manual_login_required", "message": "Cloudflare verification required on this portal — please solve it manually in the browser window. Bot will continue automatically once cleared."})
+                    logger.info("Cloudflare still blocking. Emitted manual solve event, waiting up to 120s.")
+                    try:
+                        await page.wait_for_function("document.title !== 'Just a moment...' && !document.title.toLowerCase().includes('verifying')", timeout=120000)
+                        await human_delay(1.5, 2.5)
+                        logger.info("Manual Cloudflare solve detected. Continuing flow.")
+                    except Exception:
+                        logger.warning("Cloudflare manual solve timeout.")
+        except Exception as e:
+            logger.debug(f"CF detect error: {e}")
     except PWTimeout:
-        logger.warning(f"Portal page load timed out: {apply_url}")
+        logger.warning(f"Portal page load timed out: {getattr(page,'url', str(apply_target))}")
+    except Exception as exc:
+        logger.warning(f"Portal page load failed after retries for {getattr(page,'url', str(apply_target))}: {exc}")
 
     portal_state = await detect_portal_state(page)
     if portal_state:
         logger.info(f"Portal state detected: {portal_state}")
 
     filled = 0
+    try:
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
+        await human_delay(0.8, 1.5)
+        await page.evaluate("window.scrollTo(0, 0)")
+        await human_delay(0.5, 1.0)
+    except Exception:
+        pass
 
-    # 1. Try known-portal adapters
+    filled += await _discover_and_click_apply(page)
+
+    adapter_matched = False
     for pattern, adapter in _PORTAL_ADAPTERS:
-        if pattern.search(apply_url) or pattern.search(page.url):
+        try:
+            page_url = page.url or ''
+        except Exception:
+            page_url = ''
+        if pattern.search(str(apply_url or '')) or pattern.search(page_url):
             logger.info(f"Using portal adapter: {adapter.__name__}")
             filled += await adapter(page, candidate)
-            break   # one adapter is enough for the specialist logic
+            adapter_matched = True
+            break
 
-    # 2. Semantic fill (runs on every portal to catch remaining fields)
-    filled += await _semantic_fill(page, candidate)
-
-    # 3. Upload resume
-    if candidate.resume_path and Path(candidate.resume_path).exists():
-        filled += await _upload_resume(page, candidate.resume_path)
+    if not adapter_matched:
+        logger.info("No static adapter matched. Falling back to Universal AI Handler.")
+        if emit:
+            emit({"type": "log", "level": "info", "message": "Initializing AI-powered application flow..."})
+        filled += await _ai_fallback_handler(page, candidate, login_credentials, emit)
 
     logger.info(f"Portal autofill complete – {filled} field(s) filled.")
     return page, filled, portal_state
+
+async def _discover_and_click_apply(page) -> int:
+    """Look for 'Apply', 'Apply Now', 'Submit Application' buttons and click them."""
+    apply_selectors = [
+        "button:has-text('Apply Now')",
+        "a:has-text('Apply Now')",
+        "button:has-text('Apply for this job')",
+        "a:has-text('Apply for this job')",
+        "button:has-text('Submit Application')",
+        "a:has-text('Submit Application')",
+        "button:has-text('Apply')",
+        "a:has-text('Apply')",
+        "button:has-text('Start Application')",
+        "a:has-text('Start Application')",
+        "[data-automation-id='applyButton']",
+        "button.apply-button",
+        "a.apply-button",
+        "#apply-button",
+        ".apply-btn",
+    ]
+    for sel in apply_selectors:
+        try:
+            btn = await page.query_selector(sel)
+            if btn and await btn.is_visible():
+                btn_text = (await btn.inner_text()).strip().lower()
+                # Avoid clicking "applied" or "close" buttons
+                if "applied" in btn_text or "close" in btn_text or "cancel" in btn_text:
+                    continue
+                await btn.click()
+                await human_delay(1.5, 3.0)
+                logger.info(f"Clicked apply button: {sel}")
+                return 0  # don't count button click as a filled field
+        except Exception:
+            continue
+    return 0
+
+
+async def _follow_linkedin_interstitial(page: Page) -> bool:
+    """
+    On LinkedIn safety/interstitial pages (e.g. /safety/go), there's typically
+    an anchor that points to the actual external site. Try to locate a
+    non-LinkedIn href on the page and navigate there. Returns True if a
+    follow/navigation occurred.
+    """
+    try:
+        from .linkedin import _is_valid_portal_url
+    except ImportError:
+        def _is_valid_portal_url(h: str) -> bool: return True
+
+    try:
+        for anchor in await page.query_selector_all('a[href]'):
+            try:
+                href = (await anchor.get_attribute('href') or '').strip()
+                if not href or href.startswith('javascript:') or href.startswith('#'):
+                    continue
+                if href.startswith('/'):
+                    base = page.url.split('?')[0].split('#')[0]
+                    href = '/'.join(base.split('/')[:3]) + href
+                if not _is_valid_portal_url(href) or 'linkedin.com' in href.lower():
+                    continue
+
+                popup_task = asyncio.create_task(page.context.wait_for_event('page', timeout=3000))
+                try:
+                    await anchor.click()
+                except Exception:
+                    popup_task.cancel()
+                    raise
+
+                await human_delay(1.0, 2.0)
+
+                try:
+                    popup = await popup_task
+                    await popup.wait_for_load_state('domcontentloaded', timeout=12_000)
+                    if popup.url and 'linkedin.com' not in popup.url.lower():
+                        return True
+                except Exception:
+                    pass
+
+                try:
+                    await page.wait_for_load_state('domcontentloaded', timeout=12_000)
+                except Exception:
+                    pass
+
+                if href.lower() in (page.url or '').lower() or 'linkedin.com' not in (page.url or '').lower():
+                    return True
+
+                await goto_with_retries(page, href, timeout=25_000)
+                await human_delay(1.0, 2.0)
+                return True
+            except Exception:
+                continue
+
+        meta = await page.query_selector('meta[http-equiv]')
+        if meta:
+            content = (await meta.get_attribute('content') or '')
+            match = re.search(r"url=(https?://[^;]+)", content, re.I)
+            if match:
+                href = match.group(1)
+                if 'linkedin.com' not in href.lower() and _is_valid_portal_url(href):
+                    await goto_with_retries(page, href, timeout=25_000)
+                    await human_delay(1.0, 2.0)
+                    return True
+    except Exception as exc:
+        logger.debug(f"_follow_linkedin_interstitial error: {exc}")
+    return False
 
 
 async def detect_portal_state(page: Page) -> Optional[str]:
@@ -103,7 +350,11 @@ async def detect_portal_state(page: Page) -> Optional[str]:
         title = ""
 
     # CAPTCHA / challenge detection (always check — these block everything)
-    captcha_markers = ["captcha", "checkpoint", "challenge", "verify you are human", "security verification"]
+    captcha_markers = [
+        "captcha", "checkpoint", "challenge", "verify you are human",
+        "security verification", "just a moment", "checking your browser",
+        "cloudflare", "please stand by", "robot"
+    ]
     # Treat known LinkedIn safety/interstitial pages as captcha/challenge walls
     if ("linkedin.com" in url and ("/safety/" in url or "safety/go" in url or "checkpoint" in url)):
         return "captcha_required"
@@ -111,13 +362,14 @@ async def detect_portal_state(page: Page) -> Optional[str]:
     if any(marker in url or marker in title for marker in captcha_markers):
         return "captcha_required"
 
-    # If application-form fields are visible, the page is likely usable
+    # If application-form fields are already visible, prefer the form over
+    # generic challenge strings that may appear in hidden markup or scripts.
     try:
         form_fields = await page.query_selector_all(
             "input[type='text'], input[type='email'], input[type='tel'], textarea"
         )
         visible_fields = 0
-        for f in form_fields[:10]:  # cap iteration
+        for f in form_fields[:10]:
             try:
                 if await f.is_visible():
                     visible_fields += 1
@@ -125,6 +377,22 @@ async def detect_portal_state(page: Page) -> Optional[str]:
                 pass
         if visible_fields >= 2:
             return None  # looks like a real form — not a login wall
+    except Exception:
+        pass
+
+    # Explicit CAPTCHA widgets / providers are much stronger signals than
+    # just the presence of the word "captcha" somewhere in the body HTML.
+    try:
+        captcha_widgets = await page.query_selector_all(
+            "iframe[src*='captcha'], iframe[src*='recaptcha'], iframe[src*='hcaptcha'], "
+            "div.g-recaptcha, div.h-captcha, [data-sitekey], [class*='captcha' i]"
+        )
+        for widget in captcha_widgets:
+            try:
+                if await widget.is_visible():
+                    return "captcha_required"
+            except Exception:
+                continue
     except Exception:
         pass
 
@@ -138,15 +406,6 @@ async def detect_portal_state(page: Page) -> Optional[str]:
                 prominent_text += " " + txt.lower()
         except Exception:
             pass
-
-    # Also check the full body for captcha markers only
-    try:
-        body = ((await page.text_content("body")) or "").lower()
-    except Exception:
-        body = ""
-
-    if any(marker in body for marker in captcha_markers):
-        return "captcha_required"
 
     # Registration / login detection on prominent content only
     if "create account" in prominent_text or "sign up" in prominent_text:
@@ -167,43 +426,75 @@ def _profile_as_field_map(c: CandidateProfile) -> Dict[str, str]:
     Keys are deliberately broad so they match many real label/name variations.
     """
     name_parts = c.name.strip().split(" ", 1)
+    location_parts = (c.location or "").split(",")
+    city = location_parts[0].strip() if location_parts else ""
+    state_country = location_parts[1].strip() if len(location_parts) > 1 else ""
+
     return {
         # full name variants
         "full name":    c.name,
         "full_name":    c.name,
         "name":         c.name,
+        "candidate name": c.name,
+        "applicant name": c.name,
         # first / last name
         "first name":   name_parts[0],
         "first_name":   name_parts[0],
         "firstname":    name_parts[0],
+        "given name":   name_parts[0],
+        "given_name":   name_parts[0],
         "last name":    name_parts[1] if len(name_parts) > 1 else "",
         "last_name":    name_parts[1] if len(name_parts) > 1 else "",
         "lastname":     name_parts[1] if len(name_parts) > 1 else "",
+        "surname":      name_parts[1] if len(name_parts) > 1 else "",
+        "family name":  name_parts[1] if len(name_parts) > 1 else "",
+        "family_name":  name_parts[1] if len(name_parts) > 1 else "",
         # contact
         "email":        c.email,
         "email address": c.email,
+        "e mail":       c.email,
+        "emailaddress": c.email,
         "phone":        c.phone,
         "phone number": c.phone,
+        "telephone":    c.phone,
+        "tel":          c.phone,
         "mobile":       c.phone,
         "mobile number": c.phone,
+        "cell phone":   c.phone,
+        "contact number": c.phone,
         # location
         "location":     c.location or "",
-        "city":         (c.location or "").split(",")[0].strip(),
+        "city":         city,
+        "town":         city,
+        "state":        state_country,
+        "province":     state_country,
+        "country":      state_country,
+        "address":      c.location or "",
         # cover letter
         "cover letter": c.cover_text,
         "cover_letter": c.cover_text,
+        "coverletter":  c.cover_text,
         "message":      c.cover_text,
         "additional information": c.cover_text,
+        "comments":     c.cover_text,
+        "notes":        c.cover_text,
+        "why are you interested": c.cover_text,
         # generated-resume fields
         "skills":       getattr(c, "technical_skills", "") or "",
         "technical skills": getattr(c, "technical_skills", "") or "",
         "projects":     getattr(c, "projects", "") or "",
         "project":      getattr(c, "projects", "") or "",
         "target role":  getattr(c, "target_role", "") or "",
+        "desired position": getattr(c, "target_role", "") or "",
+        "job title":    getattr(c, "target_role", "") or "",
         # linkedin
         "linkedin":     c.linkedin_url or "",
         "linkedin url": c.linkedin_url or "",
         "linkedin profile": c.linkedin_url or "",
+        "linkedin profile url": c.linkedin_url or "",
+        "social media": c.linkedin_url or "",
+        "website":      c.linkedin_url or "",
+        "portfolio":    c.linkedin_url or "",
     }
 
 
@@ -280,11 +571,17 @@ async def _upload_resume(page: Page, resume_path: str) -> int:
     Returns 1 if an upload was performed, else 0.
     """
     selectors = [
+        "input[type='file'][id*='resume' i]",
+        "input[type='file'][name*='resume' i]",
+        "input[type='file'][aria-label*='resume' i]",
+        "input[type='file'][id*='cv' i]",
+        "input[type='file'][name*='cv' i]",
+        "input[type='file'][aria-label*='cv' i]",
+        "[aria-label*='resume' i] input[type='file']",
+        "[aria-label*='cv' i] input[type='file']",
         "input[type='file'][accept*='pdf']",
         "input[type='file'][accept*='.doc']",
         "input[type='file']",
-        "[aria-label*='resume' i] input[type='file']",
-        "[aria-label*='cv' i] input[type='file']",
     ]
     for sel in selectors:
         try:
@@ -297,6 +594,87 @@ async def _upload_resume(page: Page, resume_path: str) -> int:
         except Exception as exc:
             logger.debug(f"File upload attempt failed ({sel!r}): {exc}")
     return 0
+
+
+# ── Layer 4 – Dropdown / select handling ──────────────────────────────────────
+
+async def _fill_dropdowns(page, candidate: CandidateProfile) -> int:
+    """Try to select appropriate values in dropdown/select elements."""
+    filled = 0
+    try:
+        selects = await page.query_selector_all("select")
+        for sel_el in selects:
+            try:
+                if not await sel_el.is_visible() or not await sel_el.is_enabled():
+                    continue
+
+                # Get hints from the select element
+                hints = []
+                for attr in ("aria-label", "name", "id"):
+                    v = await sel_el.get_attribute(attr)
+                    if v:
+                        hints.append(v.lower().replace("-", " ").replace("_", " "))
+
+                # Check label
+                sel_id = await sel_el.get_attribute("id")
+                if sel_id:
+                    lbl = await page.query_selector(f"label[for='{sel_id}']")
+                    if lbl:
+                        hints.append((await lbl.inner_text()).lower().strip())
+
+                hint_str = " ".join(hints)
+
+                # Get available options
+                options = await sel_el.query_selector_all("option")
+                option_values = []
+                for opt in options:
+                    val = await opt.get_attribute("value")
+                    text = (await opt.inner_text()).strip()
+                    option_values.append((val or "", text.lower()))
+
+                # Try to match based on field type
+                selected = False
+                if any(k in hint_str for k in ["country", "nation"]):
+                    # Try to find India or US in options
+                    location = (candidate.location or "").lower()
+                    for val, text in option_values:
+                        if "india" in text or "india" in location:
+                            if "india" in text:
+                                await sel_el.select_option(value=val)
+                                filled += 1
+                                selected = True
+                                break
+                        elif "united states" in text or "usa" in text or "us" in text:
+                            if "us" in location or "usa" in location:
+                                await sel_el.select_option(value=val)
+                                filled += 1
+                                selected = True
+                                break
+
+                elif any(k in hint_str for k in ["experience", "years"]):
+                    # Select a mid-range experience option
+                    for val, text in option_values:
+                        if any(yr in text for yr in ["0", "1", "2", "entry", "junior", "fresher"]):
+                            await sel_el.select_option(value=val)
+                            filled += 1
+                            selected = True
+                            break
+
+                elif any(k in hint_str for k in ["source", "how did you hear", "referral"]):
+                    for val, text in option_values:
+                        if "linkedin" in text:
+                            await sel_el.select_option(value=val)
+                            filled += 1
+                            selected = True
+                            break
+
+                if selected:
+                    await human_delay(0.3, 0.7)
+            except Exception as exc:
+                logger.debug(f"Dropdown fill error: {exc}")
+    except Exception as exc:
+        logger.debug(f"Dropdown query error: {exc}")
+    return filled
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -529,3 +907,533 @@ def _city(location: Optional[str]) -> str:
     if not location:
         return ""
     return location.split(",")[0].strip()
+
+
+# ── Universal AI Handler (Fallback) ──────────────────────────────────────────
+
+async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_credentials: Optional[Any], emit: Optional[Any] = None) -> int:
+    from .config import GEMINI_API_KEY, get_portal_credentials
+    from .browser import human_delay
+    from pathlib import Path
+    import asyncio
+    import json
+    
+    if not GEMINI_API_KEY:
+        logger.warning("GEMINI_API_KEY not set. Cannot run Universal AI Handler.")
+        return 0
+        
+    import google.generativeai as genai
+    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.GenerativeModel("gemini-2.0-flash")
+    
+    filled_count = 0
+    
+    for step in range(8):
+        if emit:
+            emit({"type": "log", "level": "info", "message": f"AI Handler Step {step + 1}/8..."})
+        
+        await human_delay(2.0, 4.0)
+        
+        # 1. Classify page
+        page_type, reasoning = await classify_portal_page(page, client)
+        logger.info(f"AI classified page as {page_type}: {reasoning}")
+        if emit:
+            emit({"type": "log", "level": "info", "message": f"Page classified as: {page_type}"})
+
+        # Check for bypass buttons first
+        bypass_selectors = [
+            "button:has-text('Apply without an Account')",
+            "a:has-text('Apply without an Account')",
+            "button:has-text('Apply Manually')",
+            "a:has-text('Apply Manually')",
+            "button:has-text('Continue without account')",
+            "a:has-text('Continue without account')"
+        ]
+        bypassed = False
+        for b_sel in bypass_selectors:
+            try:
+                btn = await page.query_selector(b_sel)
+                if btn and await btn.is_visible():
+                    logger.info(f"Clicking bypass button: {b_sel}")
+                    if emit:
+                        emit({"type": "log", "level": "info", "message": f"Found bypass button, clicking to skip login..."})
+                    await btn.click()
+                    await human_delay(2.0, 4.0)
+                    bypassed = True
+                    break
+            except Exception:
+                pass
+                
+        if bypassed:
+            continue
+
+        if page_type == "CAPTCHA":
+            if emit:
+                emit({"type": "manual_login_required", "message": "CAPTCHA detected. Please solve it manually."})
+            break
+        elif page_type == "UNKNOWN":
+            logger.info("AI could not understand the page. Stopping.")
+            break
+        elif page_type in ("LOGIN_PAGE", "REGISTER_PAGE", "LOGIN_OR_REGISTER"):
+            creds = get_portal_credentials(page.url, login_credentials)
+            email = creds.get("email")
+            password = creds.get("password")
+            
+            if not email or not password:
+                logger.warning("Missing portal credentials for login/register.")
+                break
+                
+            fields = await map_form_fields(page, candidate, client, page_type, email, password, emit)
+            if not fields:
+                logger.warning("No fields mapped for login/register.")
+                break
+                
+            filled_count += await fill_and_submit_mapped_fields(page, fields, candidate, client, emit)
+            
+        elif page_type == "APPLICATION_FORM":
+            # Upgrade 9: Form Before Screenshot
+            try:
+                from .diagnostics import DIAGNOSTICS_DIR
+                await page.screenshot(path=str(DIAGNOSTICS_DIR / "form_before.png"), full_page=True)
+                if emit: emit({"type": "log", "level": "info", "message": "Screenshot saved: form_before.png"})
+            except Exception as e:
+                logger.debug(f"Failed to capture form_before.png: {e}")
+
+            fields = await map_form_fields(page, candidate, client, page_type, "", "", emit)
+            if fields:
+                filled_count += await fill_and_submit_mapped_fields(page, fields, candidate, client, emit)
+            else:
+                logger.info("No application fields found to fill. Attempting to upload resume.")
+                if candidate.resume_path:
+                    filled_count += await _upload_resume(page, candidate.resume_path, emit)
+                    
+            # Upgrade 6: Pre-submit validation
+            await _pre_submit_validation(page, candidate, client, emit)
+
+            # Upgrade 9: Form After Screenshot
+            try:
+                from .diagnostics import DIAGNOSTICS_DIR
+                await page.screenshot(path=str(DIAGNOSTICS_DIR / "form_after.png"), full_page=True)
+                if emit: emit({"type": "log", "level": "info", "message": "Screenshot saved: form_after.png"})
+            except Exception as e:
+                logger.debug(f"Failed to capture form_after.png: {e}")
+                
+            # Upgrade 5: reCAPTCHA detection
+            await _handle_recaptcha_before_submit(page, emit)
+
+            # Try to click next/continue/submit
+            clicked = await click_next_or_submit(page)
+            if not clicked:
+                logger.info("No 'Next' or 'Submit' button found. Form may be complete.")
+                break
+                
+            # Upgrade 7: Post-submit confirmation
+            await _post_submit_confirmation(page, emit)
+    
+    return filled_count
+
+async def ai_answer_unknown_field(field_label: str, field_type: str, candidate: CandidateProfile, api_key: str) -> str:
+    """Upgrade 2: AI-powered field answering for unknown questions using Gemini."""
+    import google.generativeai as genai
+    import json
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    
+    profile_json = candidate.model_dump_json(exclude={'resume_path'})
+    prompt_string = f"""You are filling a job application form on behalf of a candidate. The field label is: {field_label}. The field type is: {field_type}. Here is everything known about the candidate as JSON: {profile_json}. Based on this, what is the most appropriate answer for this field? Rules: if the candidate profile does not contain a direct answer, use the safest most common answer that would not disqualify them. For yes/no questions about things not in the profile such as security clearance, default to No. For location preference, use the candidate's stored preferred_location or location field. For citizenship and work authorization questions, use the work_authorization field. For questions about salary, use salary_expectation field or leave blank if empty. Return ONLY the answer value as a plain string with absolutely no explanation, no punctuation around it, no quotes."""
+    
+    try:
+        response = await _call_gemini_with_retry(model, prompt_string)
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"ai_answer_unknown_field failed for {field_label}: {e}")
+        return ""
+
+async def fill_dropdown(page: Page, selector: str, desired_value: str):
+    """Upgrade 3: Smart dropdown handler."""
+    from .browser import human_delay
+    try:
+        el = await page.query_selector(selector)
+        if not el: return
+        tag = await el.evaluate("e => e.tagName.toLowerCase()")
+        role = await el.evaluate("e => e.getAttribute('role') || ''")
+        
+        # Type 1: Native HTML select
+        if tag == 'select':
+            options = await el.evaluate("""e => Array.from(e.options).map(o => ({text: o.innerText, value: o.value}))""")
+            best_match = None
+            for opt in options:
+                if desired_value.lower() in opt['text'].lower():
+                    best_match = opt['text']
+                    break
+            if best_match:
+                await el.select_option(label=best_match)
+            return
+
+        # Type 2: Custom div-based dropdown (role=listbox or combobox, not input)
+        if tag != 'input' and ('listbox' in role.lower() or 'combobox' in role.lower()):
+            await el.click()
+            await human_delay(0.5, 0.5)
+            # Find visible options
+            options = await page.query_selector_all("li, [role='option'], .option, .item")
+            for opt in options:
+                if await opt.is_visible():
+                    text = await opt.inner_text()
+                    if text and desired_value.lower() in text.lower():
+                        await opt.click()
+                        return
+            return
+
+        # Type 3: Combobox text input
+        if tag == 'input' and 'combobox' in role.lower():
+            await el.click()
+            await el.fill("") # Clear first
+            for char in desired_value:
+                await el.type(char, delay=50)
+            await human_delay(0.8, 0.8)
+            # Click first suggestion
+            options = await page.query_selector_all("li, [role='option']")
+            for opt in options:
+                if await opt.is_visible():
+                    await opt.click()
+                    return
+    except Exception as e:
+        logger.error(f"fill_dropdown failed for {selector}: {e}")
+
+async def _upload_resume(page: Page, resume_path: str, emit: Optional[Any] = None) -> int:
+    """Upgrade 4: Dual resume upload handling."""
+    from .browser import human_delay
+    try:
+        # Check for 'Attach resume' button
+        attach_btns = await page.query_selector_all("button, a")
+        clicked_attach = False
+        for btn in attach_btns:
+            text = await btn.inner_text()
+            if text and ("attach resume" in text.lower() or "attach" in text.lower()):
+                await btn.click()
+                await human_delay(1.0, 1.0)
+                clicked_attach = True
+                break
+        
+        # Standard fallback inputs
+        selectors = [
+            "input[type='file']",
+            "input[accept*='pdf']",
+            "input[accept*='resume']"
+        ]
+        
+        uploaded = False
+        for sel in selectors:
+            try:
+                el = await page.query_selector(sel)
+                if el:
+                    await el.set_input_files(resume_path)
+                    await human_delay(2.0, 2.0)
+                    logger.info(f"Resume uploaded via selector: {sel!r}")
+                    uploaded = True
+                    break
+            except Exception:
+                pass
+                
+        if uploaded:
+            # Verify filename appears on page
+            import os
+            filename = os.path.basename(resume_path)
+            body_text = await page.inner_text("body")
+            if filename not in body_text:
+                if emit: emit({"type": "log", "level": "warning", "message": "Resume upload may have failed — filename not found on page after upload"})
+            return 1
+            
+    except Exception as exc:
+        logger.debug(f"Dual upload logic failed: {exc}")
+    return 0
+
+async def _pre_submit_validation(page: Page, candidate: CandidateProfile, client: Any, emit: Optional[Any]):
+    """Upgrade 6: Pre-submit required field validation."""
+    from .config import GEMINI_API_KEY
+    from .browser import human_delay
+    try:
+        required_elements = []
+        for frame_idx, frame in enumerate(page.frames):
+            try:
+                frame_reqs = await frame.evaluate("""
+                (frameIdx) => {
+                    const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
+                    return inputs.map(i => {
+                        const isRequired = i.hasAttribute('required') || i.getAttribute('aria-required') === 'true' || 
+                                           (i.labels && i.labels.length > 0 && i.labels[0].innerText.includes('*'));
+                        const val = i.value || '';
+                        const emptyVals = ['-- No answer --', '-- Select --', '-- Please select --', ''];
+                        if (isRequired && emptyVals.includes(val)) {
+                            const aiId = i.getAttribute('data-ai-id');
+                            return {
+                                css_selector: aiId ? `[data-ai-id='${aiId}']` : (i.id ? '#' + i.id : (i.name ? '[name="' + i.name + '"]' : '')),
+                                frame_idx: frameIdx,
+                                label: (i.labels && i.labels.length > 0) ? i.labels[0].innerText : (i.getAttribute('aria-label') || ''),
+                                type: i.tagName.toLowerCase() === 'select' ? 'dropdown' : i.type
+                            };
+                        }
+                        return null;
+                    }).filter(i => i !== null && i.css_selector !== '');
+                }
+                """, frame_idx)
+                if frame_reqs: required_elements.extend(frame_reqs)
+            except Exception:
+                pass
+        
+        for req in required_elements:
+            if not req.get('label'): continue
+            ans = await ai_answer_unknown_field(req['label'], req['type'], candidate, GEMINI_API_KEY)
+            if ans:
+                frame_idx = req.get('frame_idx', 0)
+                target_frame = page.frames[frame_idx] if frame_idx < len(page.frames) else page
+                if req['type'] == 'dropdown':
+                    await fill_dropdown(target_frame, req['css_selector'], ans)
+                else:
+                    el = await target_frame.query_selector(req['css_selector'])
+                    if el: await el.fill(ans)
+                if emit: emit({"type": "log", "level": "info", "message": f"Pre-submit fix: filled {req['label']} with {ans}"})
+                await human_delay(0.5, 1.0)
+    except Exception as e:
+        logger.error(f"Pre-submit validation failed: {e}")
+
+async def _handle_recaptcha_before_submit(page: Page, emit: Optional[Any]):
+    """Upgrade 5: reCAPTCHA detection and handling."""
+    import asyncio
+    try:
+        recaptcha_iframe = await page.query_selector('iframe[src*="recaptcha"], div.g-recaptcha, div[data-sitekey]')
+        is_robot_text = await page.evaluate("() => document.body.innerText.includes('I am not a robot')")
+        
+        if recaptcha_iframe or is_robot_text:
+            if recaptcha_iframe:
+                box = await recaptcha_iframe.bounding_box()
+                if box:
+                    await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                    await asyncio.sleep(3)
+                    
+            # Check success
+            checked = await page.query_selector("div.recaptcha-checkbox-checked")
+            if checked:
+                if emit: emit({"type": "log", "level": "info", "message": "reCAPTCHA checkbox clicked successfully"})
+                return
+                
+            # Check for visual challenge
+            challenge = await page.query_selector('iframe[title*="challenge"], iframe[src*="bframe"]')
+            if challenge:
+                if emit: emit({"type": "manual_login_required", "message": "reCAPTCHA image challenge detected — please solve manually in the browser window"})
+                for _ in range(18):
+                    await asyncio.sleep(10)
+                    still_there = await page.query_selector('iframe[title*="challenge"], iframe[src*="bframe"]')
+                    if not still_there:
+                        break
+    except Exception as e:
+        logger.error(f"reCAPTCHA handling error: {e}")
+
+async def _post_submit_confirmation(page: Page, emit: Optional[Any]):
+    """Upgrade 7: Post-submit confirmation detection."""
+    from .models import JobStatus
+    import asyncio
+    try:
+        success_indicators = ["confirmation", "thank-you", "thank_you", "success", "submitted", "complete", "apply-complete"]
+        success_phrases = ["application submitted", "thank you for applying", "we have received your application", "application complete", "you have successfully applied", "your application has been received"]
+        
+        found_success = False
+        for _ in range(7):
+            await asyncio.sleep(2)
+            url = page.url.lower()
+            if any(ind in url for ind in success_indicators):
+                found_success = True
+                break
+            
+            body = await page.inner_text('body')
+            body_lower = body.lower()
+            if any(phrase in body_lower for phrase in success_phrases):
+                found_success = True
+                break
+                
+            dialog = await page.query_selector('[role="dialog"]')
+            if dialog:
+                found_success = True
+                break
+                
+        if found_success:
+            if emit: emit({"type": "log", "level": "info", "message": "Application submitted successfully — confirmation detected"})
+            # To mark as APPLIED, we don't return JobStatus directly here, orchestrator sets it based on filled_count.
+        else:
+            from .diagnostics import DIAGNOSTICS_DIR
+            await page.screenshot(path=str(DIAGNOSTICS_DIR / "submit_result.png"), full_page=True)
+            if emit: emit({"type": "log", "level": "warning", "message": "Submit clicked but no confirmation detected — screenshot saved for manual review"})
+            # The orchestrator is listening, but we can't easily force MANUAL_REVIEW from here unless we raise an exception or modify the return tuple. We will rely on orchestrator observing filled>0 as APPLIED for now, or if it catches MANUAL_REVIEW if we raise a specific error. The user said "mark job status as MANUAL_REVIEW rather than FAILED". We'll just return a special count or rely on the orchestrator to check state. Let's just raise an Exception so orchestrator can catch it, wait no, they said "mark job status as MANUAL_REVIEW". We will raise an exception: `raise Exception("MANUAL_REVIEW: No confirmation detected")`
+            raise Exception("MANUAL_REVIEW: Submit clicked but no confirmation detected")
+    except Exception as e:
+        if "MANUAL_REVIEW" in str(e):
+            raise
+        logger.error(f"Post-submit check error: {e}")
+
+async def classify_portal_page(page: Page, client: Any) -> Tuple[str, str]:
+    import json
+    try:
+        html = await page.evaluate("document.body.innerText")
+        content = html[:10000]
+        
+        prompt = f"""Analyze the following web page text and classify its primary purpose.
+        Respond in JSON with 'page_type' and 'reasoning'.
+        Valid page_types: LOGIN_PAGE, REGISTER_PAGE, LOGIN_OR_REGISTER, APPLICATION_FORM, CAPTCHA, UNKNOWN.
+        
+        Page Text:
+        {content}
+        """
+        
+        response = await _call_gemini_with_retry(client, prompt)
+        text = response.text.strip()
+        start = text.find('{')
+        end = text.rfind('}') + 1
+        data = json.loads(text[start:end])
+        return data.get("page_type", "UNKNOWN"), data.get("reasoning", "")
+    except Exception as e:
+        logger.error(f"Classification error: {e}")
+        return "UNKNOWN", str(e)
+
+async def map_form_fields(page: Page, candidate: CandidateProfile, client: Any, page_type: str, email: str, password: str, emit: Optional[Any] = None) -> List[Dict]:
+    import json
+    from .config import GEMINI_API_KEY
+    try:
+        all_elements = []
+        for frame_idx, frame in enumerate(page.frames):
+            try:
+                elements = await frame.evaluate("""
+                (frameIdx) => {
+                    let counter = 1;
+                    const inputs = Array.from(document.querySelectorAll('input, select, textarea, [role="combobox"], [role="listbox"]'));
+                    return inputs.map(i => {
+                        const aiId = 'ai_' + frameIdx + '_' + counter++;
+                        i.setAttribute('data-ai-id', aiId);
+                        
+                        let labelText = '';
+                        if (i.labels && i.labels.length > 0) {
+                            labelText = i.labels[0].innerText;
+                        } else {
+                            const prev = i.previousElementSibling;
+                            if (prev && prev.innerText) labelText = prev.innerText;
+                            else if (i.parentElement && i.parentElement.innerText) {
+                                labelText = i.parentElement.innerText.replace(i.innerText || '', '').trim();
+                            }
+                        }
+                        
+                        return {
+                            ai_id: aiId,
+                            frame_idx: frameIdx,
+                            tag: i.tagName.toLowerCase(),
+                            type: i.type || '',
+                            id: i.id || '',
+                            name: i.name || '',
+                            placeholder: i.placeholder || '',
+                            ariaLabel: i.getAttribute('aria-label') || '',
+                            label: labelText.substring(0, 150)
+                        };
+                    }).filter(i => i.type !== 'hidden' && i.type !== 'submit');
+                }
+                """, frame_idx)
+                
+                if elements:
+                    all_elements.extend(elements)
+            except Exception as e:
+                logger.debug(f"Could not read frame {frame_idx}: {e}")
+        
+        if not all_elements:
+            return []
+            
+        profile_json = candidate.model_dump_json(exclude={'resume_path'})
+        
+        prompt = f"""Map the provided form fields to the candidate profile data.
+        Page Type: {page_type}
+        Candidate Data: {profile_json}
+        Portal Email: {email}
+        Portal Password: {password}
+        Form Elements: {json.dumps(all_elements)}
+        
+        Return a JSON array where each object has 'ai_id', 'frame_idx', 'value_to_fill', 'label', and 'source'.
+        'source' must be exactly one of: 'profile_direct', 'profile_inferred', 'default_value', 'unknown'. Use 'unknown' if no profile key matches.
+        For select dropdowns, provide the text value to select.
+        If it's a login/register page, strictly map the Portal Email and Portal Password to the correct fields.
+        Ignore file uploads or irrelevant fields.
+        """
+        
+        response = await _call_gemini_with_retry(client, prompt)
+        text = response.text.strip()
+        start = text.find('[')
+        end = text.rfind(']') + 1
+        if start != -1 and end != -1:
+            data = json.loads(text[start:end])
+            
+            for item in data:
+                if item.get('source') == 'unknown':
+                    ans = await ai_answer_unknown_field(item.get('label', ''), "text", candidate, GEMINI_API_KEY)
+                    if ans:
+                        item['value_to_fill'] = ans
+                        item['source'] = 'ai_answered'
+                        
+            return data
+        return []
+    except Exception as e:
+        logger.error(f"Mapping error: {e}")
+        return []
+
+async def fill_and_submit_mapped_fields(page: Page, fields: List[Dict], candidate: CandidateProfile, client: Any, emit: Optional[Any] = None) -> int:
+    from .browser import human_delay
+    filled = 0
+    for field in fields:
+        ai_id = field.get('ai_id')
+        sel = f"[data-ai-id='{ai_id}']" if ai_id else field.get('css_selector')
+        val = field.get('value_to_fill')
+        source = field.get('source', 'default_value')
+        label = field.get('label', sel)
+        frame_idx = field.get('frame_idx', 0)
+        
+        if not sel or not val:
+            continue
+            
+        try:
+            target_frame = page.frames[frame_idx] if frame_idx < len(page.frames) else page
+            el = await target_frame.query_selector(sel)
+            
+            if el and await el.is_visible():
+                tag = await el.evaluate("e => e.tagName.toLowerCase()")
+                role = await el.evaluate("e => e.getAttribute('role') || ''")
+                
+                if tag == 'select' or 'listbox' in role.lower() or 'combobox' in role.lower():
+                    await fill_dropdown(target_frame, sel, str(val))
+                else:
+                    await el.fill(str(val))
+                await human_delay(0.2, 0.5)
+                filled += 1
+                
+                if emit: emit({"type": "log", "level": "info", "message": f"Field filled: {label} = {val} (source: {source})"})
+        except Exception as e:
+            logger.debug(f"Failed to fill {sel} in frame {frame_idx}: {e}")
+            
+    return filled
+
+async def click_next_or_submit(page: Page) -> bool:
+    from .browser import human_delay
+    btn_selectors = [
+        "button[type='submit']",
+        "input[type='submit']",
+        "button:has-text('Next')",
+        "button:has-text('Continue')",
+        "button:has-text('Submit')",
+        "a:has-text('Next')",
+        "a:has-text('Continue')",
+        "button:has-text('Apply')"
+    ]
+    for sel in btn_selectors:
+        try:
+            btn = await page.query_selector(sel)
+            if btn and await btn.is_visible() and await btn.is_enabled():
+                await btn.click()
+                await human_delay(2.0, 4.0)
+                logger.info(f"Clicked navigation button: {sel}")
+                return True
+        except Exception:
+            pass
+    return False

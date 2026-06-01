@@ -18,6 +18,7 @@ class JobStatus(str, Enum):
     APPLIED  = "applied"
     SKIPPED  = "skipped"
     FAILED   = "failed"
+    MANUAL_REVIEW = "manual_review"
 
 
 # ── Candidate ─────────────────────────────────────────────────────────────────
@@ -38,12 +39,32 @@ class CandidateProfile(BaseModel):
     location:     Optional[str]  = None   # e.g. "Meerut, India"
     linkedin_url: Optional[str]  = None
 
+    # Extended Profile
+    us_citizen: str = "Yes"
+    visa_sponsorship_required: str = "No"
+    security_clearance: str = "No"
+    clearance_type: str = ""
+    clearance_date: str = ""
+    preferred_location: str = ""
+    willing_to_relocate: str = "No"
+    work_authorization: str = "Authorized to work in the US"
+    gender: str = ""
+    ethnicity: str = ""
+    veteran_status: str = "I am not a veteran"
+    disability_status: str = "I do not have a disability"
+    salary_expectation: str = ""
+    notice_period: str = "2 weeks"
+    years_of_experience: str = ""
+    custom_answers_text: str = ""
+
 
 class LoginCredentials(BaseModel):
     linkedin_email: Optional[str] = None
     linkedin_password: Optional[str] = None
     gmail_address: Optional[str] = None
     gmail_app_password: Optional[str] = None
+    portal_email: Optional[str] = None
+    portal_password: Optional[str] = None
 
 
 class SearchFilters(BaseModel):

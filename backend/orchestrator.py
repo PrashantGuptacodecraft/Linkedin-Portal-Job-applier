@@ -20,6 +20,7 @@ Flow
 from __future__ import annotations
 
 import asyncio
+import threading
 import traceback
 import uuid
 from typing import Any, Callable, Dict, List, Optional
@@ -27,18 +28,33 @@ from typing import Any, Callable, Dict, List, Optional
 from loguru import logger
 from playwright.async_api import TimeoutError as PWTimeout, async_playwright
 
-from browser  import build_context, human_delay, save_session
-from config   import DIAGNOSTICS_DIR
-from diagnostics import DiagnosticsCapture
-from linkedin import (
-    build_search_url,
-    build_search_urls,
-    discover_job_cards,
-    ensure_logged_in,
-    extract_job_details,
-)
-from models   import AutoApplyRequest, JobResult, JobStatus, SessionSummary
-from portal   import autofill_portal_form
+try:
+    from .browser  import build_context, goto_with_retries, human_delay, save_session, new_stealth_page
+    from .config   import DIAGNOSTICS_DIR, DomainSkippedError
+    from .diagnostics import DiagnosticsCapture
+    from .linkedin import (
+        build_search_url,
+        build_search_urls,
+        discover_job_cards,
+        ensure_logged_in,
+        extract_job_details,
+        open_external_apply_page,
+    )
+    from .models   import AutoApplyRequest, JobResult, JobStatus, SessionSummary
+    from .portal   import autofill_portal_form
+except ImportError:
+    from browser  import build_context, goto_with_retries, human_delay, save_session, new_stealth_page
+    from config   import DIAGNOSTICS_DIR, DomainSkippedError
+    from diagnostics import DiagnosticsCapture
+    from linkedin import (
+        build_search_url,
+        build_search_urls,
+        discover_job_cards,
+        ensure_logged_in,
+        extract_job_details,
+    )
+    from models   import AutoApplyRequest, JobResult, JobStatus, SessionSummary
+    from portal   import autofill_portal_form
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -48,6 +64,7 @@ async def run_pipeline(
     emit: Optional[Callable[[Dict[str, Any]], None]] = None,
     *,
     apply_external: bool = True,
+    stop_event: Optional[threading.Event] = None,
 ) -> SessionSummary:
     """
     Run the full automation pipeline.
@@ -94,6 +111,66 @@ async def run_pipeline(
                     emit_event({"type": "error", "message": "LinkedIn login failed. Aborting."})
                     return summary
 
+                # -------------------------------------------------------------
+                # Branch: C2C Post Application Mode
+                # -------------------------------------------------------------
+                search_in = req.filters.extra_params.get('search_in') if req.filters else None
+                if search_in == 'linkedin_posts':
+                    emit_event({"type": "log", "level": "info", "message": "Executing C2C LinkedIn Posts pipeline..."})
+                    from .linkedin import build_search_url, discover_post_leads
+                    from .gmail_client import send_c2c_application_email
+                    from .config import GEMINI_API_KEY
+                    
+                    search_url = req.search_url or build_search_url(req.keywords, filters=req.filters)
+                    summary.search_url = search_url
+                    
+                    emit_event({"type": "log", "level": "info", "message": f"Navigating to feed: {search_url}"})
+                    page = await new_stealth_page(context)
+                    try:
+                        await goto_with_retries(page, search_url, timeout=30_000)
+                        await human_delay(2.5, 4.0)
+                        
+                        emit_event({"type": "log", "level": "info", "message": "Scrolling feed and extracting recruiter emails..."})
+                        leads = await discover_post_leads(page, req.max_jobs)
+                        
+                        if not leads:
+                            emit_event({"type": "log", "level": "warning", "message": "No recruiter emails found in posts."})
+                            return summary
+                            
+                        summary.total = len(leads)
+                        emit_event({"type": "log", "level": "info", "message": f"Found {len(leads)} C2C leads."})
+                        
+                        for lead in leads:
+                            if stop_event and stop_event.is_set(): break
+                            
+                            emit_event({"type": "status", "job_url": lead['url'], "status": "processing"})
+                            emit_event({"type": "log", "level": "info", "message": f"Sending C2C email to {lead['email']}"})
+                            
+                            success = await send_c2c_application_email(
+                                to_email=lead['email'],
+                                post_text=lead['text'],
+                                candidate=req.candidate_profile,
+                                resume_path=req.candidate_profile.resume_path,
+                                credentials=req.login_credentials,
+                                gemini_api_key=GEMINI_API_KEY
+                            )
+                            
+                            if success:
+                                summary.applied += 1
+                                emit_event({"type": "status", "job_url": lead['url'], "status": "applied"})
+                                emit_event({"type": "log", "level": "success", "message": f"Applied to {lead['author']} via Gmail."})
+                            else:
+                                summary.failed += 1
+                                emit_event({"type": "status", "job_url": lead['url'], "status": "failed"})
+                                
+                            await human_delay(3.0, 6.0)
+                            
+                    finally:
+                        await page.close()
+                    
+                    return summary
+
+
                 emit_event({"type": "log", "level": "info", "message": "LinkedIn login confirmed."})
 
                 # ── 2. Collect job URLs ───────────────────────────────────────
@@ -106,9 +183,16 @@ async def run_pipeline(
                 emit_event({"type": "log", "level": "info", "message": f"Found {len(job_urls)} job(s) to process."})
 
                 # ── 3. Process each job ───────────────────────────────────────
-                detail_page = await context.new_page()
+                detail_page = await new_stealth_page(context)
+                retry_queue: List[str] = []
+                retried_jobs: set[str] = set()
 
                 for idx, job_url in enumerate(job_urls, start=1):
+                    if stop_event and stop_event.is_set():
+                        logger.info("Pipeline cancelled by client.")
+                        emit_event({"type": "info", "message": "Pipeline stopped by user."})
+                        break
+
                     result = await _process_one_job(
                         idx         = idx,
                         total       = len(job_urls),
@@ -120,6 +204,13 @@ async def run_pipeline(
                         emit        = emit_event,
                         apply_external = apply_external,
                     )
+
+                    if result.error == "captcha_required" and job_url not in retried_jobs:
+                        retry_queue.append(job_url)
+                        retried_jobs.add(job_url)
+                        emit_event({"type": "log", "level": "warning", "message": f"Verification wall detected for {job_url}; requeueing once after manual solve."})
+                        continue
+
                     summary.results.append(result)
 
                     if result.status == JobStatus.APPLIED:
@@ -132,6 +223,28 @@ async def run_pipeline(
                     emit_event({"type": "job_result", "job": result.model_dump(mode="json")})
                     await human_delay(2.0, 5.0)
 
+                for job_url in retry_queue:
+                    result = await _process_one_job(
+                        idx         = len(summary.results) + 1,
+                        total       = len(job_urls),
+                        job_url     = job_url,
+                        req         = req,
+                        context     = context,
+                        detail_page = detail_page,
+                        diag        = diag,
+                        emit        = emit_event,
+                        apply_external = apply_external,
+                    )
+                    summary.results.append(result)
+                    if result.status == JobStatus.APPLIED:
+                        summary.applied += 1
+                    elif result.status == JobStatus.SKIPPED:
+                        summary.skipped += 1
+                    else:
+                        summary.failed += 1
+                    emit_event({"type": "job_result", "job": result.model_dump(mode="json")})
+                    await human_delay(2.0, 5.0)
+
                 await detail_page.close()
 
             except Exception as exc:
@@ -139,7 +252,10 @@ async def run_pipeline(
                 emit_event({"type": "error", "message": f"Pipeline crashed: {exc}"})
 
             finally:
-                await save_session(context)
+                try:
+                    await save_session(context)
+                except Exception as exc:
+                    logger.debug(f"save_session failed in teardown: {exc}")
                 # Closing the context also flushes the HAR file
                 try:
                     await context.close()
@@ -177,7 +293,23 @@ async def _collect_job_urls(
     if req.job_url:
         summary.search_url = req.job_url
         emit({"type": "log", "level": "info", "message": f"Using supplied job URL: {req.job_url}"})
-        return [req.job_url]
+        # Inspect the single job and only return it if it leads to an external apply portal
+        try:
+            check_page = await new_stealth_page(context)
+            try:
+                res = await extract_job_details(check_page, req.job_url)
+            finally:
+                try:
+                    await check_page.close()
+                except Exception:
+                    pass
+            if res.apply_type == "external" and res.apply_url:
+                return [req.job_url]
+            emit({"type": "log", "level": "info", "message": "Supplied job is Easy Apply or has no external portal; skipping."})
+            return []
+        except Exception:
+            emit({"type": "log", "level": "warning", "message": f"Failed to inspect supplied job URL: {req.job_url}. Skipping."})
+            return []
 
     # Navigate to search (supplied URL or built from keywords)
     if req.search_url:
@@ -199,10 +331,10 @@ async def _collect_job_urls(
     for search_url in search_urls:
         if len(urls) >= req.max_jobs:
             break
-        page = await context.new_page()
+        page = await new_stealth_page(context)
         try:
             try:
-                await page.goto(search_url, timeout=30_000, wait_until="domcontentloaded")
+                await goto_with_retries(page, search_url, timeout=30_000)
             except PWTimeout:
                 logger.warning(f"Search page timed out while loading: {search_url}")
                 # The page may still contain enough markup for selector-based discovery.
@@ -218,7 +350,29 @@ async def _collect_job_urls(
         finally:
             await page.close()
 
-    return urls
+    # Post-filter: only keep jobs that have an external apply URL (skip Easy Apply)
+    filtered: List[str] = []
+    for job_url in urls:
+        if len(filtered) >= req.max_jobs:
+            break
+        check_page = await new_stealth_page(context)
+        try:
+            try:
+                res = await extract_job_details(check_page, job_url)
+            except Exception as exc:
+                emit({"type": "log", "level": "warning", "message": f"Failed to inspect job {job_url}: {exc}"})
+                continue
+            if res.apply_type == "external" and res.apply_url:
+                filtered.append(job_url)
+            else:
+                emit({"type": "log", "level": "info", "message": f"Skipping Easy Apply or non-external job: {job_url}"})
+        finally:
+            try:
+                await check_page.close()
+            except Exception:
+                pass
+
+    return filtered
 
 
 # ── Single-job processing ─────────────────────────────────────────────────────
@@ -276,46 +430,93 @@ async def _process_one_job(
         # that case and attempt a fallback: open the original job page and
         # look for an external "apply" href (company careers/ATS) to use.
         apply_url_to_use = result.apply_url
-        try:
-            check_page = await context.new_page()
-            await check_page.goto(result.apply_url, timeout=30_000)
-            # quick heuristic: LinkedIn error pages include id="error404" on body
-            body_id = await check_page.eval_on_selector('body', 'e => e.id')
-            if body_id and 'error404' in body_id:
-                # look for external anchors on the original job URL
-                await check_page.close()
-                alt_page = await context.new_page()
-                try:
-                    await alt_page.goto(job_url, timeout=30_000)
-                except Exception:
-                    pass
-                anchors = await alt_page.query_selector_all('a')
-                found_external = None
-                for a in anchors:
-                    href = await a.get_attribute('href')
-                    if href and href.startswith('http') and 'linkedin.com' not in href:
-                        found_external = href
-                        break
-                try:
-                    await alt_page.close()
-                except Exception:
-                    pass
-                if found_external:
-                    apply_url_to_use = found_external
-            else:
-                await check_page.close()
-        except Exception:
-            # if anything goes wrong, fall back to the original apply_url
-            try:
-                await check_page.close()
-            except Exception:
-                pass
+        portal_page = None
 
-        portal_page, filled, portal_state = await autofill_portal_form(
-            context,
-            apply_url_to_use,
-            req.candidate,
+        # First, attempt to click the LinkedIn Apply button and capture a
+        # newly opened portal tab (preferred). This avoids reopening the
+        # URL and preserves the browser context of the popup.
+        try:
+            try:
+                popup_page, popup_url = await open_external_apply_page(context, job_url, detail_page)
+            except Exception:
+                popup_page, popup_url = None, None
+            if popup_page:
+                portal_page = popup_page
+                if popup_url:
+                    apply_url_to_use = popup_url
+                _emit(emit, "log", level="info", message=f"Captured portal page via Apply click: {apply_url_to_use}")
+        except Exception:
+            portal_page = None
+
+        # If we didn't capture a popup, fall back to loading the apply URL
+        # directly and use heuristic fallbacks to find an external link.
+        if not portal_page:
+            apply_url_to_use = result.apply_url
+            try:
+                check_page = await new_stealth_page(context)
+                await goto_with_retries(check_page, result.apply_url, timeout=30_000)
+                # quick heuristic: LinkedIn error pages include id="error404" on body
+                body_id = await check_page.eval_on_selector('body', 'e => e.id')
+                if body_id and 'error404' in body_id:
+                    # look for external anchors on the original job URL
+                    await check_page.close()
+                    alt_page = await new_stealth_page(context)
+                    try:
+                        await goto_with_retries(alt_page, job_url, timeout=30_000)
+                    except Exception:
+                        pass
+                    anchors = await alt_page.query_selector_all('a')
+                    found_external = None
+                    for a in anchors:
+                        href = await a.get_attribute('href')
+                        if href and href.startswith('http') and 'linkedin.com' not in href:
+                            found_external = href
+                            break
+                    try:
+                        await alt_page.close()
+                    except Exception:
+                        pass
+                    if found_external:
+                        apply_url_to_use = found_external
+                        _emit(
+                            emit,
+                            "log",
+                            level="info",
+                            message=f"Resolved portal fallback URL: {apply_url_to_use}",
+                        )
+                else:
+                    await check_page.close()
+            except Exception:
+                # if anything goes wrong, fall back to the original apply_url
+                try:
+                    await check_page.close()
+                except Exception:
+                    pass
+
+        _emit(
+            emit,
+            "log",
+            level="info",
+            message=f"Opening portal apply URL: {apply_url_to_use}",
         )
+
+        # If we already captured a portal Page, pass it directly to autofill.
+        if portal_page:
+            portal_page, filled, portal_state = await autofill_portal_form(
+                context,
+                portal_page,
+                req.candidate,
+                login_credentials=req.login_credentials,
+                emit=emit,
+            )
+        else:
+            portal_page, filled, portal_state = await autofill_portal_form(
+                context,
+                apply_url_to_use,
+                req.candidate,
+                login_credentials=req.login_credentials,
+                emit=emit,
+            )
         result.filled_fields = filled
         result.portal_state = portal_state
         if portal_state == "registration_required":
@@ -349,6 +550,11 @@ async def _process_one_job(
                     portal_page, f"no_fill_{result.job_id}"
                 )
 
+    except DomainSkippedError as exc:
+        logger.warning(f"Domain skipped for {result.apply_url}: {exc}")
+        result.status = JobStatus.SKIPPED
+        result.error = str(exc)
+        _emit(emit, "log", level="warning", message=f"  ⚠ {exc}")
     except Exception as exc:
         logger.error(f"Portal autofill error for {result.apply_url}: {exc}")
         result.status = JobStatus.FAILED

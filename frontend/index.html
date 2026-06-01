@@ -817,7 +817,7 @@ input.error, textarea.error {
 
 .setup-grid {
   display: grid;
-  grid-template-columns: 1.2fr .8fr;
+  grid-template-columns: 1fr;
   gap: 1rem;
 }
 
@@ -839,6 +839,40 @@ input.error, textarea.error {
   border-radius: 16px;
   padding: 1rem;
   background: rgba(255,255,255,0.02);
+}
+
+.simple-choice-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+
+.simple-choice {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: .55rem .9rem;
+  background: rgba(255,255,255,0.02);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color .18s ease, background .18s ease, transform .18s ease;
+}
+
+.simple-choice:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-hover);
+}
+
+.simple-choice.active {
+  border-color: rgba(91,138,245,0.55);
+  background: rgba(91,138,245,0.14);
+  color: #dbe7ff;
+}
+
+.simple-choice:focus-visible {
+  outline: 2px solid rgba(91,138,245,0.45);
+  outline-offset: 2px;
 }
 
 .setup-summary .subject-line {
@@ -891,6 +925,28 @@ input.error, textarea.error {
   transition: border-color .2s ease, transform .2s ease, background .2s ease;
 }
 
+.profile-mode-card .mode-header,
+.resume-mode-card .mode-header {
+  display: flex;
+  align-items: center;
+  gap: .7rem;
+  margin-bottom: .55rem;
+}
+
+.profile-mode-card .mode-icon,
+.resume-mode-card .mode-icon,
+.role-chip .role-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  background: rgba(91,138,245,0.12);
+  color: #dbe7ff;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
 .profile-mode-card:hover {
   transform: translateY(-1px);
   border-color: var(--border-hover);
@@ -935,22 +991,119 @@ input.error, textarea.error {
   margin-top: .9rem;
 }
 
+.choice-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .75rem;
+}
+
+.choice-grid.two-up {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.choice-card {
+  display: flex;
+  align-items: center;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: .6rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: .85rem .9rem;
+  background: rgba(255,255,255,0.02);
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  cursor: pointer;
+  transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease;
+  text-align: left;
+}
+
+.choice-card:hover {
+  align-items: flex-start;
+  gap: .65rem;
+  box-shadow: 0 10px 22px rgba(0,0,0,0.18);
+}
+
+  padding: .7rem .8rem;
+  border-color: rgba(91,138,245,0.55);
+  background: linear-gradient(135deg, rgba(91,138,245,0.16), rgba(124,92,245,0.1));
+  box-shadow: 0 10px 24px rgba(91,138,245,0.15);
+}
+
+.choice-icon {
+  width: 42px;
+  height: 42px;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  font-size: 20px;
+}
+  font-size: 16px;
+.choice-body {
+  min-width: 0;
+}
+
+.choice-body strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: .15rem;
+}
+
+.choice-body span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
 .setup-pill {
   border: 1px solid rgba(91,138,245,0.22);
   background: rgba(91,138,245,0.08);
   color: #cfe0ff;
-  border-radius: 999px;
-  padding: .35rem .7rem;
+  font-size: 11px;
+  line-height: 1.3;
   font-size: 11px;
   font-weight: 700;
 }
 
 .resume-mode-grid {
-  display: grid;
+  gap: .6rem;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: .75rem;
   margin-bottom: .9rem;
 }
+
+.resume-mode-card {
+  border: 1px solid var(--border);
+  padding: .8rem .9rem;
+  background: rgba(255,255,255,0.02);
+  padding: .95rem 1rem;
+  cursor: pointer;
+  transition: border-color .2s ease, transform .2s ease, background .2s ease;
+}
+
+.resume-mode-card:hover {
+  gap: .45rem;
+  border-color: var(--border-hover);
+}
+
+.resume-mode-card.active {
+  background: linear-gradient(180deg, rgba(91,138,245,0.12), rgba(91,138,245,0.05));
+  border-color: rgba(91,138,245,0.42);
+}
+
+  padding: .7rem .85rem;
+  margin-bottom: .3rem;
+  font-size: 14px;
+}
+
+.resume-mode-card p {
+  color: var(--text-muted);
+  font-size: 12px;
+  align-items: flex-start;
+  gap: .65rem;
 
 .mode-field-note {
   font-size: 12px;
@@ -958,13 +1111,13 @@ input.error, textarea.error {
   margin-top: .5rem;
 }
 
-.role-picker {
+  font-size: 13px;
   display: flex;
   flex-direction: column;
   gap: .55rem;
 }
 
-.role-chip {
+  font-size: 11px;
   width: 100%;
   border: 1px solid rgba(91,138,245,0.22);
   border-radius: 14px;
@@ -974,6 +1127,29 @@ input.error, textarea.error {
   text-align: left;
   cursor: pointer;
   transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease;
+}
+
+.role-chip .role-chip-layout {
+  display: flex;
+  .choice-grid,
+  .choice-grid.two-up,
+  .resume-mode-grid,
+  .profile-mode-grid {
+    grid-template-columns: 1fr;
+  }
+  .choice-body span,
+  .role-chip-sub,
+  .profile-mode-card p,
+  .resume-mode-card p {
+    font-size: 11px;
+  }
+  align-items: flex-start;
+  gap: .8rem;
+}
+
+.role-chip .role-chip-body {
+  min-width: 0;
+  flex: 1;
 }
 
 .role-chip:hover {
@@ -1006,13 +1182,153 @@ input.error, textarea.error {
 
 .role-chip-check {
   flex-shrink: 0;
-  font-size: 13px;
-  color: var(--success);
-  opacity: 0;
+  width: 18px;
+  height: 18px;
+  transition: transform .25s ease;
+}
+
+.role-chip-check svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke .25s ease;
 }
 
 .role-chip.active .role-chip-check {
+  transform: rotate(180deg);
+}
+
+.role-chip.active .role-chip-check svg {
+  stroke: var(--success);
+}
+
+/* ── Keyword combo dropdown ───────────────────────────────────────────── */
+.keyword-combo {
+  position: relative;
+}
+
+.keyword-combo-input {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.keyword-combo-input input {
+  border-radius: 12px 0 0 12px;
+  border-right: none;
+  flex: 1;
+}
+
+.keyword-combo-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 0 12px 12px 0;
+  background: rgba(255,255,255,0.03);
+  cursor: pointer;
+  transition: background .2s ease, border-color .2s ease;
+}
+
+.keyword-combo-toggle:hover {
+  background: rgba(91,138,245,0.10);
+  border-color: var(--border-hover);
+}
+
+.keyword-combo-toggle svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform .25s ease, stroke .25s ease;
+}
+
+.keyword-combo-toggle.open svg {
+  transform: rotate(180deg);
+  stroke: var(--accent);
+}
+
+.keyword-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 100;
+  border: 1px solid rgba(91,138,245,0.25);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(16,20,34,0.98), rgba(10,13,21,0.98));
+  box-shadow: 0 16px 48px rgba(0,0,0,0.45), 0 0 0 1px rgba(91,138,245,0.08);
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  transition: max-height .3s ease, opacity .2s ease;
+  pointer-events: none;
+}
+
+.keyword-dropdown.open {
+  max-height: 320px;
   opacity: 1;
+  pointer-events: auto;
+}
+
+.keyword-dropdown-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: .75rem 1rem;
+  cursor: pointer;
+  transition: background .15s ease;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+.keyword-dropdown-item:last-child {
+  border-bottom: none;
+}
+
+.keyword-dropdown-item:hover {
+  background: rgba(91,138,245,0.10);
+}
+
+.keyword-dropdown-item.selected {
+  background: rgba(91,138,245,0.14);
+}
+
+.keyword-dropdown-item .kw-role {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.keyword-dropdown-item .kw-focus {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.keyword-dropdown-item .kw-check {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  transition: border-color .2s ease, background .2s ease;
+}
+
+.keyword-dropdown-item.selected .kw-check {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: inset 0 0 0 2px rgba(10,13,21,0.9);
 }
 
 .resume-mode-card {
@@ -1097,6 +1413,66 @@ input.error, textarea.error {
   padding: 1rem;
 }
 
+.preview-launcher {
+  display: flex;
+  gap: .6rem;
+  flex-wrap: wrap;
+  margin-top: .85rem;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 8, 14, 0.78);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.modal-backdrop.visible {
+  display: flex;
+}
+
+.modal-card {
+  width: min(1100px, 100%);
+  height: min(90vh, 860px);
+  background: #0f1320;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: 0 30px 100px rgba(0,0,0,0.5);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: .9rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h4 {
+  font-size: 14px;
+  margin: 0;
+}
+
+.modal-body {
+  flex: 1;
+  background: #11151f;
+}
+
+.modal-body iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
 .summary-box pre {
   white-space: pre-wrap;
   word-break: break-word;
@@ -1167,6 +1543,16 @@ input.error, textarea.error {
                   <input type="password" id="gmail_app_password" placeholder="Gmail App Password" />
                 </div>
               </div>
+              <div class="row" style="margin-top: .6rem;">
+                <div class="form-group">
+                  <label>Portal Master Email</label>
+                  <input type="email" id="portal_email" placeholder="Portal Email (e.g. you@gmail.com)" />
+                </div>
+                <div class="form-group">
+                  <label>Portal Master Password <span class="hint">(Seed for deterministic generation)</span></label>
+                  <input type="password" id="portal_password" placeholder="Portal Password" />
+                </div>
+              </div>
               <div class="alert-banner info visible" style="display:flex;margin-top:.6rem">
                 <span class="alert-icon">⚠️</span>
                 <span>Use Gmail App Password, not your primary password. Enable 2-Step Verification first.</span>
@@ -1177,11 +1563,18 @@ input.error, textarea.error {
               <div class="card-title" style="margin-bottom:.8rem"><span class="icon">🔍</span> Search Config</div>
               <div class="form-group">
                 <label>Keyword / Skill Set</label>
-                <input type="text" id="keywords" value="Java Developer + C2C" placeholder="Java Developer + C2C" />
+                <div class="simple-choice-grid" data-choice-group="keywords">
+                  <button class="simple-choice active" type="button" data-role="Java Developer + C2C" data-focus="Java, Spring Boot, Hibernate/JPA, REST APIs, MySQL" onclick="selectSearchKeyword(this)">Java Developer + C2C</button>
+                  <button class="simple-choice" type="button" data-role="Business Analyst + C2C" data-focus="SQL, reporting, requirements analysis, stakeholder communication" onclick="selectSearchKeyword(this)">Business Analyst + C2C</button>
+                  <button class="simple-choice" type="button" data-role="Data Analyst + C2C" data-focus="Excel, SQL, dashboards, data cleaning, Power BI" onclick="selectSearchKeyword(this)">Data Analyst + C2C</button>
+                  <button class="simple-choice" type="button" data-role="Frontend Developer" data-focus="HTML, CSS, JavaScript, React, responsive UI" onclick="selectSearchKeyword(this)">Frontend Developer</button>
+                  <button class="simple-choice" type="button" data-role="Web Developer" data-focus="HTML, CSS, JavaScript, web app integration" onclick="selectSearchKeyword(this)">Web Developer</button>
+                </div>
+                <input type="hidden" id="keywords" value="Java Developer + C2C" />
               </div>
               <div class="form-group">
                 <label>Active Profile</label>
-                <div class="profile-badge">👤 Java Developer</div>
+                <div class="profile-badge" id="setup-profile-badge">👤 Java Developer</div>
               </div>
               <div class="setup-summary">
                 <div class="meta-label">Subject</div>
@@ -1195,25 +1588,31 @@ input.error, textarea.error {
                 <div class="meta-row">
                   <div class="meta-block">
                     <div class="meta-label">Time Range</div>
-                    <div class="meta-value">
-                      <select id="posted_within_hours">
-                        <option value="24">Last 24h</option>
-                        <option value="72">Last 3 days</option>
-                        <option value="168">Last week</option>
-                      </select>
+                    <div class="simple-choice-grid" data-choice-group="posted_within_hours">
+                      <button class="simple-choice active" type="button" data-choice-value="24" onclick="setChoiceValue('posted_within_hours', '24', this)">Last 24h</button>
+                      <button class="simple-choice" type="button" data-choice-value="72" onclick="setChoiceValue('posted_within_hours', '72', this)">Last 3 days</button>
+                      <button class="simple-choice" type="button" data-choice-value="168" onclick="setChoiceValue('posted_within_hours', '168', this)">Last week</button>
                     </div>
                   </div>
                   <div class="meta-block">
                     <div class="meta-label">Search In</div>
-                    <div class="meta-value">
-                      <select id="search_in">
-                        <option value="linkedin_posts">LinkedIn Posts</option>
-                        <option value="linkedin_jobs">LinkedIn Jobs</option>
-                        <option value="gmail">Gmail</option>
-                      </select>
+                    <div class="simple-choice-grid" data-choice-group="search_in">
+                      <button class="simple-choice active" type="button" data-choice-value="linkedin_posts" onclick="setChoiceValue('search_in', 'linkedin_posts', this)">LinkedIn Posts</button>
+                      <button class="simple-choice" type="button" data-choice-value="linkedin_jobs" onclick="setChoiceValue('search_in', 'linkedin_jobs', this)">LinkedIn Jobs</button>
+                      <button class="simple-choice" type="button" data-choice-value="gmail" onclick="setChoiceValue('search_in', 'gmail', this)">Gmail</button>
                     </div>
                   </div>
                 </div>
+                <select id="posted_within_hours" class="legacy-hidden">
+                  <option value="24" selected>Last 24h</option>
+                  <option value="72">Last 3 days</option>
+                  <option value="168">Last week</option>
+                </select>
+                <select id="search_in" class="legacy-hidden">
+                  <option value="linkedin_posts" selected>LinkedIn Posts</option>
+                  <option value="linkedin_jobs">LinkedIn Jobs</option>
+                  <option value="gmail">Gmail</option>
+                </select>
                 <div class="form-group" style="margin-top:.9rem">
                   <label>Exact LinkedIn Job URL <span class="hint">(optional)</span></label>
                   <input type="url" id="job_url" placeholder="https://www.linkedin.com/jobs/view/..." />
@@ -1239,12 +1638,22 @@ input.error, textarea.error {
         <div class="card-title"><span class="icon">👤</span> Candidate Profile</div>
         <div class="profile-mode-grid">
           <div class="profile-mode-card active" id="profile-manual-card" onclick="setProfileMode('manual')">
-            <h4>Manual</h4>
-            <p>You edit the fields yourself and keep the uploaded resume unchanged.</p>
+            <div class="mode-header">
+              <div class="mode-icon">✍️</div>
+              <div>
+                <h4>Manual</h4>
+                <p>You edit the fields yourself and keep the uploaded resume unchanged.</p>
+              </div>
+            </div>
           </div>
           <div class="profile-mode-card" id="profile-ai-card" onclick="setProfileMode('ai')">
-            <h4>AI</h4>
-            <p>Role-based skills, projects, and PDF generation are auto-tailored from the job config.</p>
+            <div class="mode-header">
+              <div class="mode-icon">🤖</div>
+              <div>
+                <h4>AI</h4>
+                <p>Role-based skills, projects, and PDF generation are auto-tailored from the job config.</p>
+              </div>
+            </div>
           </div>
         </div>
         <div class="row">
@@ -1258,33 +1667,48 @@ input.error, textarea.error {
             <input type="hidden" id="target_role" value="Java Developer + C2C" />
             <div class="role-picker" id="role-picker">
               <button class="role-chip active" type="button" data-role="Java Developer + C2C" data-focus="Java, Spring Boot, Hibernate/JPA, REST APIs, MySQL" onclick="setTargetRole(this)">
-                <div>
-                  <div class="role-chip-main">Java Developer + C2C <span class="role-chip-check">✓</span></div>
+                <div class="role-chip-layout">
+                  <div class="role-icon">☕</div>
+                  <div class="role-chip-body">
+                  <div class="role-chip-main">Java Developer + C2C <span class="role-chip-check"><svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg></span></div>
                   <div class="role-chip-sub">Core backend roles with contract-to-contract targeting</div>
+                  </div>
                 </div>
               </button>
               <button class="role-chip" type="button" data-role="Business Analyst + C2C" data-focus="SQL, reporting, requirements analysis, stakeholder communication" onclick="setTargetRole(this)">
-                <div>
-                  <div class="role-chip-main">Business Analyst + C2C <span class="role-chip-check">✓</span></div>
+                <div class="role-chip-layout">
+                  <div class="role-icon">📊</div>
+                  <div class="role-chip-body">
+                  <div class="role-chip-main">Business Analyst + C2C <span class="role-chip-check"><svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg></span></div>
                   <div class="role-chip-sub">Requirement gathering, process mapping, reporting, and coordination</div>
+                  </div>
                 </div>
               </button>
               <button class="role-chip" type="button" data-role="Data Analyst + C2C" data-focus="Excel, SQL, dashboards, data cleaning, Power BI" onclick="setTargetRole(this)">
-                <div>
-                  <div class="role-chip-main">Data Analyst + C2C <span class="role-chip-check">✓</span></div>
+                <div class="role-chip-layout">
+                  <div class="role-icon">📈</div>
+                  <div class="role-chip-body">
+                  <div class="role-chip-main">Data Analyst + C2C <span class="role-chip-check"><svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg></span></div>
                   <div class="role-chip-sub">Analysis, reporting, dashboards, and data-driven insights</div>
+                  </div>
                 </div>
               </button>
               <button class="role-chip" type="button" data-role="Frontend Developer" data-focus="HTML, CSS, JavaScript, React, responsive UI" onclick="setTargetRole(this)">
-                <div>
-                  <div class="role-chip-main">Frontend Developer <span class="role-chip-check">✓</span></div>
+                <div class="role-chip-layout">
+                  <div class="role-icon">🎨</div>
+                  <div class="role-chip-body">
+                  <div class="role-chip-main">Frontend Developer <span class="role-chip-check"><svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg></span></div>
                   <div class="role-chip-sub">UI development, responsive layouts, and client-side logic</div>
+                  </div>
                 </div>
               </button>
               <button class="role-chip" type="button" data-role="Web Developer" data-focus="HTML, CSS, JavaScript, web app integration" onclick="setTargetRole(this)">
-                <div>
-                  <div class="role-chip-main">Web Developer <span class="role-chip-check">✓</span></div>
+                <div class="role-chip-layout">
+                  <div class="role-icon">🌐</div>
+                  <div class="role-chip-body">
+                  <div class="role-chip-main">Web Developer <span class="role-chip-check"><svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg></span></div>
                   <div class="role-chip-sub">General web development and interface implementation</div>
+                  </div>
                 </div>
               </button>
             </div>
@@ -1322,19 +1746,188 @@ input.error, textarea.error {
           <label>Projects <span class="hint">(add your project details later)</span></label>
           <textarea id="projects" placeholder="Project title, stack, and impact...">Project details will be added later.</textarea>
         </div>
+        <details class="card" style="padding:1rem; margin-top:1rem; background:rgba(255,255,255,0.015); border: 1px solid var(--border)">
+          <summary class="card-title" style="cursor:pointer; margin-bottom:0;"><span class="icon">🔍</span> Extended Profile (Optional)</summary>
+          <div class="row" style="margin-top:1rem;">
+            <div class="form-group">
+              <label>US Citizen</label>
+              <input type="text" id="us_citizen" value="Yes" />
+            </div>
+            <div class="form-group">
+              <label>Visa Sponsorship Required</label>
+              <input type="text" id="visa_sponsorship_required" value="No" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="form-group">
+              <label>Security Clearance</label>
+              <input type="text" id="security_clearance" value="No" />
+            </div>
+            <div class="form-group">
+              <label>Clearance Type</label>
+              <input type="text" id="clearance_type" placeholder="e.g. Secret" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="form-group">
+              <label>Clearance Date</label>
+              <input type="text" id="clearance_date" placeholder="e.g. 01/2020" />
+            </div>
+            <div class="form-group">
+              <label>Preferred Location</label>
+              <input type="text" id="preferred_location" placeholder="e.g. New York, NY" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="form-group">
+              <label>Willing to Relocate</label>
+              <input type="text" id="willing_to_relocate" value="No" />
+            </div>
+            <div class="form-group">
+              <label>Work Authorization</label>
+              <input type="text" id="work_authorization" value="Authorized to work in the US" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="form-group">
+              <label>Gender</label>
+              <input type="text" id="gender" placeholder="e.g. Male" />
+            </div>
+            <div class="form-group">
+              <label>Ethnicity</label>
+              <input type="text" id="ethnicity" placeholder="e.g. Asian" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="form-group">
+              <label>Veteran Status</label>
+              <input type="text" id="veteran_status" value="I am not a veteran" />
+            </div>
+            <div class="form-group">
+              <label>Disability Status</label>
+              <input type="text" id="disability_status" value="I do not have a disability" />
+            </div>
+          </div>
+          <div class="row">
+            <div class="form-group">
+              <label>Salary Expectation</label>
+              <input type="text" id="salary_expectation" placeholder="e.g. $120,000" />
+            </div>
+            <div class="form-group">
+              <label>Notice Period</label>
+              <input type="text" id="notice_period" value="2 weeks" />
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Years of Experience</label>
+            <input type="text" id="years_of_experience" placeholder="e.g. 5 years" />
+          </div>
+        </details>
       </div>
+
+      
+          <details class="card" style="padding:1rem; margin-top:1rem; background:rgba(255,255,255,0.015); border: 1px solid var(--border)" open>
+            <summary class="card-title" style="cursor:pointer; margin-bottom:0;"><span class="icon">📝</span> Custom Q&A Data (For Unknown Portals)</summary>
+            <div class="form-group" style="margin-top:1rem;">
+              <label>Dump all your highly specific profile answers here. The AI will read this exact text when filling obscure form fields.</label>
+              <textarea id="custom_answers_text" rows="15" style="font-family: monospace; font-size: 13px;">Personal Information
+First Name: Prashant
+Last Name: Gupta
+Email Address: prashant983869@gmail.com
+Phone Number: +91 9838693305
+City: San Francisco
+State: California
+Zip Code: 94105
+Country: USA
+LinkedIn Profile URL: https://www.linkedin.com/in/prashant-gupta-923885328/
+GitHub Profile URL: https://github.com/PrashantGuptacodecraft
+Portfolio / Website URL: N/A
+Pronouns: He/Him
+
+Work Authorization usa
+Are you legally authorized to work in the US? yes
+Will you now or in the future require visa sponsorship? yes
+Work authorization type: usa
+Country of citizenship: usa
+
+Security Clearance no
+Do you have an active security clearance? No
+Clearance level: None
+Poly type: None
+Clearance granted date: N/A
+Last background investigation date: N/A
+Clearance issuing agency: N/A
+
+Experience & Skills
+Total years of professional experience: 4
+Years of experience in primary skill (Java): 3
+Highest education level: Bachelor's (in progress, if applicable)
+Degree field / Major: btech
+University / College name: Kiet group of institution
+Graduation year: 2028
+Primary programming languages: Java, JavaScript
+Frameworks and tools: React (learning), Git, GitHub
+Databases: [NOT PROVIDED]
+Cloud platforms: [NOT PROVIDED]
+
+Job Preferences
+Desired job title: Software Engineer
+Desired salary / salary expectation: 50k
+Salary type: Per Year
+Employment type preferred: Full Time
+Preferred work location: Remote / Hybrid
+Open to relocation: yes
+Preferred work mode: Remote
+Available start date: Immediate
+Notice period: Immediately
+
+EEO / Voluntary Disclosures
+Gender: Male
+Ethnicity: usa
+Veteran status: Not a veteran
+Disability status: Prefer not to say
+
+Cover & Application
+Cover letter text: Available upon request
+How did you hear about this job: LinkedIn
+Referral name: N/A
+Are you a former employee of this company: No
+
+Contract / C2C Specific
+Are you on C2C or W2: N/A
+Company / Vendor name (for C2C): N/A
+Tax term: N/A
+Current pay rate: N/A
+Expected pay rate: [NOT PROVIDED]
+Are you comfortable with background check: Yes
+Are you comfortable with drug test: Yes
+Job search status: Actively looking
+Area of expertise: Backend Development, Java
+Ideal role(s): Java Developer, Backend Developer</textarea>
+            </div>
+          </details>
 
       <div class="card legacy-hidden" id="resume-panel">
         <div class="card-title"><span class="icon">📄</span> Resume & Tailoring</div>
 
         <div class="resume-mode-grid">
           <div class="resume-mode-card active" id="mode-upload-card" onclick="setResumeMode('upload')">
-            <h4>Self Attach</h4>
-            <p>Upload your existing PDF or DOCX resume and use it as-is for portal submissions.</p>
+            <div class="mode-header">
+              <div class="mode-icon">📎</div>
+              <div>
+                <h4>Self Attach</h4>
+                <p>Upload your existing PDF or DOCX resume and use it as-is for portal submissions.</p>
+              </div>
+            </div>
           </div>
           <div class="resume-mode-card" id="mode-generate-card" onclick="setResumeMode('generate')">
-            <h4>Generate by Role</h4>
-            <p>Draft a resume outline tailored to the selected role, skills, and projects.</p>
+            <div class="mode-header">
+              <div class="mode-icon">✨</div>
+              <div>
+                <h4>Generate by Role</h4>
+                <p>Draft a resume outline tailored to the selected role, skills, and projects.</p>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1394,6 +1987,7 @@ input.error, textarea.error {
 
         <div class="actions">
           <button class="btn btn-primary" type="button" onclick="generateResumeDraft()">✨ Generate Resume PDF</button>
+          <button class="btn btn-outline" type="button" id="preview-resume-btn" onclick="openResumePreview()" disabled>👁 Preview PDF</button>
           <button class="btn btn-outline" type="button" onclick="resetProfileFields()">↻ Reset Profile</button>
         </div>
       </div>
@@ -1420,249 +2014,160 @@ input.error, textarea.error {
     </div>
   </div>
 
-  <!-- ═══ TWO-COLUMN CONTENT ═══════════════════════════════════════════════ -->
-  <div class="content legacy-hidden">
+  <!-- ═══ RUN CONTROLS & RESULTS ═══════════════════════════════════════════ -->
+  <div style="max-width:var(--max-w);margin:0 auto;padding:0 var(--gutter) var(--gutter)">
 
-    <!-- ── LEFT COLUMN: Configuration ─────────────────────────────────────── -->
-    <div class="column">
-
-      <!-- Login Credentials -->
-      <div class="card" id="card-login">
-        <div class="card-title"><span class="icon">🔐</span> Login Credentials</div>
-        <div class="row">
-          <div class="form-group">
-            <label>LinkedIn Email</label>
-            <input type="email" id="linkedin_email" placeholder="you@email.com" />
-          </div>
-          <div class="form-group">
-            <label>LinkedIn Password</label>
-            <input type="password" id="linkedin_password" placeholder="••••••••" />
-          </div>
-        </div>
-        <div class="alert-banner info visible" style="display:flex;margin-top:.6rem">
-          <span class="alert-icon">💡</span>
-          <span>Leave blank to log in manually in the browser window. Recommended for first use.</span>
-        </div>
+    <!-- Search & Filter Config -->
+    <div class="card">
+      <div class="card-title"><span class="icon">🔍</span> Search &amp; Filter Config</div>
+      <div class="form-group">
+        <label>LinkedIn Search URL <span class="hint">(optional)</span></label>
+        <input type="url" id="search_url" placeholder="https://linkedin.com/jobs/search/?..." />
       </div>
-
-      <!-- Job Search -->
-      <div class="card" id="card-search">
-        <div class="card-title"><span class="icon">🔍</span> Job Search</div>
+      <div class="row triple">
         <div class="form-group">
-          <label>Keywords <span class="hint">(or use the URL fields below)</span></label>
-          <input type="text" id="keywords" placeholder="e.g. Python backend developer intern" />
-        </div>
-        <div class="row">
-          <div class="form-group">
-            <label>LinkedIn Search URL <span class="hint">(optional)</span></label>
-            <input type="url" id="search_url" placeholder="https://linkedin.com/jobs/search/?..." />
-          </div>
-          <div class="form-group">
-            <label>Single Job URL <span class="hint">(optional)</span></label>
-            <input type="url" id="job_url" placeholder="https://linkedin.com/jobs/view/…" />
-          </div>
-        </div>
-
-        <hr class="section-divider" />
-
-        <!-- Filters -->
-        <div class="card-title" style="margin-bottom:.8rem"><span class="icon">⚙️</span> Filters</div>
-        <div class="row triple">
-          <div class="form-group">
-            <label>Max jobs</label>
-            <input type="number" id="max_jobs" value="5" min="1" max="25" />
-          </div>
-          <div class="form-group">
-            <label>Posted within</label>
-            <select id="posted_within_hours">
-              <option value="24">Last 24 hours</option>
-              <option value="72">Last 3 days</option>
-              <option value="168">Last week</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Locations <span class="hint">(comma-sep)</span></label>
-            <input type="text" id="locations" placeholder="Bengaluru, Pune" />
-          </div>
-        </div>
-
-        <div class="row">
-          <div class="checkbox-row">
-            <input type="checkbox" id="easy_apply_only" />
-            <label for="easy_apply_only">Easy Apply only</label>
-          </div>
-          <div class="checkbox-row">
-            <input type="checkbox" id="remote_only" />
-            <label for="remote_only">Remote only</label>
-          </div>
-        </div>
-
-        <div class="toggle-row" style="margin-top:.6rem">
-          <div>
-            <div class="toggle-label">Visible browser</div>
-            <div class="toggle-desc">Required for 2FA &amp; manual login (recommended)</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="headless" checked />
-            <span class="slider"></span>
-          </label>
-        </div>
-      </div>
-
-      <!-- Candidate Profile -->
-      <div class="card" id="card-candidate">
-        <div class="card-title"><span class="icon">👤</span> Candidate Profile</div>
-        <div class="row">
-          <div class="form-group">
-            <label>Full Name</label>
-            <input type="text" id="name" placeholder="John Doe" />
-          </div>
-          <div class="form-group">
-            <label>Email</label>
-            <input type="email" id="email" placeholder="john@example.com" />
-          </div>
-        </div>
-        <div class="row">
-          <div class="form-group">
-            <label>Phone</label>
-            <input type="tel" id="phone" placeholder="+1 555 123 4567" />
-          </div>
-          <div class="form-group">
-            <label>Location</label>
-            <input type="text" id="location" placeholder="San Francisco, CA" />
-          </div>
+          <label>Max jobs</label>
+          <input type="number" id="max_jobs" value="5" min="1" max="25" />
         </div>
         <div class="form-group">
-          <label>LinkedIn Profile URL <span class="hint">(optional)</span></label>
-          <input type="url" id="linkedin_url" placeholder="https://linkedin.com/in/yourname" />
-        </div>
-        <div class="form-group">
-          <label>Cover Letter / Message</label>
-          <textarea id="cover_text" placeholder="Brief cover text used for portal message fields…"></textarea>
-        </div>
-
-        <!-- Resume Upload -->
-        <label style="margin-bottom:.4rem;display:block;font-size:12px;font-weight:500;color:var(--text-secondary)">Resume (PDF or DOCX)</label>
-        <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()">
-          <div class="icon-upload">📎</div>
-          <p>Click or drag & drop your resume</p>
-          <div class="filename" id="upload-name"></div>
-        </div>
-        <input type="file" id="file-input" accept=".pdf,.doc,.docx" />
-      </div>
-
-      <!-- Actions -->
-      <div class="actions">
-        <button class="btn btn-primary" id="start-btn" onclick="startRun()">
-          <span id="start-btn-text">▶ Start Automation</span>
-          <span class="spinner" id="start-spinner"></span>
-        </button>
-        <button class="btn btn-danger" id="stop-btn" disabled onclick="stopRun()">
-          ■ Stop
-        </button>
-        <button class="btn btn-outline" id="diag-btn" onclick="toggleDiagnostics()">
-          🗂 Diagnostics
-        </button>
-        <button class="btn btn-ghost" onclick="resetRunUI()">
-          ↻ Reset
-        </button>
-      </div>
-
-    </div><!-- /left column -->
-
-    <!-- ── RIGHT COLUMN: Live Results ─────────────────────────────────────── -->
-    <div class="column">
-
-      <!-- Run Panel -->
-      <div id="run-panel">
-        <div class="card">
-          <div class="card-title"><span class="icon">🚀</span> Run Progress</div>
-
-          <div class="alert-banner warn" id="manual-alert">
-            <span class="alert-icon">⚠️</span>
-            <span>Manual action required in the browser window (login / 2FA). The bot will continue automatically.</span>
-          </div>
-
-          <div class="progress-bar-wrap">
-            <div class="progress-bar" id="progress-bar"></div>
-          </div>
-
-          <div class="stats">
-            <div class="stat total">
-              <div class="stat-num" id="s-total">0</div>
-              <div class="stat-lbl">Total</div>
-            </div>
-            <div class="stat applied">
-              <div class="stat-num" id="s-applied">0</div>
-              <div class="stat-lbl">Applied</div>
-            </div>
-            <div class="stat skipped">
-              <div class="stat-num" id="s-skipped">0</div>
-              <div class="stat-lbl">Skipped</div>
-            </div>
-            <div class="stat failed">
-              <div class="stat-num" id="s-failed">0</div>
-              <div class="stat-lbl">Failed</div>
-            </div>
-          </div>
-
-          <div class="log-console" id="log-console"></div>
-        </div>
-
-        <!-- Job Results -->
-        <div class="card section-gap">
-          <div class="card-title"><span class="icon">📋</span> Job Results</div>
-          <div class="job-list" id="job-list">
-            <div class="empty-state" id="job-list-empty">
-              <div class="empty-icon">📭</div>
-              <div>Results will appear here as jobs are processed…</div>
-            </div>
-          </div>
+          <label>Locations <span class="hint">(comma-sep)</span></label>
+          <input type="text" id="locations" placeholder="Bengaluru, Pune" />
         </div>
       </div>
+      <div class="row">
+        <div class="checkbox-row">
+          <input type="checkbox" id="easy_apply_only" />
+          <label for="easy_apply_only">Easy Apply only</label>
+        </div>
+        <div class="checkbox-row">
+          <input type="checkbox" id="remote_only" />
+          <label for="remote_only">Remote only</label>
+        </div>
+      </div>
+      <div class="toggle-row" style="margin-top:.6rem">
+        <div>
+          <div class="toggle-label">Visible browser</div>
+          <div class="toggle-desc">Required for 2FA &amp; manual login (recommended)</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="headless" checked />
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
 
-      <!-- Diagnostics Panel -->
-      <div id="diag-panel">
-        <div class="card">
-          <div class="card-title"><span class="icon">🗂</span> Captured Diagnostics</div>
-          <div id="diag-content">
-            <ul class="diag-list" id="diag-list">
-              <li style="color:var(--text-muted);cursor:default">Click "Diagnostics" to load…</li>
-            </ul>
-            <div id="diag-detail"></div>
+    <!-- Action Buttons -->
+    <div class="actions">
+      <button class="btn btn-primary" id="start-btn" onclick="startRun()">
+        <span id="start-btn-text">▶ Start Automation</span>
+        <span class="spinner" id="start-spinner"></span>
+      </button>
+      <button class="btn btn-danger" id="stop-btn" disabled onclick="stopRun()">
+        ■ Stop
+      </button>
+      <button class="btn btn-outline" id="diag-btn" onclick="toggleDiagnostics()">
+        🗂 Diagnostics
+      </button>
+      <button class="btn btn-ghost" onclick="resetRunUI()">
+        ↻ Reset
+      </button>
+    </div>
+
+    <!-- Run Panel -->
+    <div id="run-panel" style="display:none">
+      <div class="card">
+        <div class="card-title"><span class="icon">🚀</span> Run Progress</div>
+
+        <div class="alert-banner warn" id="manual-alert">
+          <span class="alert-icon">⚠️</span>
+          <span>Manual action required in the browser window (login / 2FA). The bot will continue automatically.</span>
+        </div>
+
+        <div class="progress-bar-wrap">
+          <div class="progress-bar" id="progress-bar"></div>
+        </div>
+
+        <div class="stats">
+          <div class="stat total">
+            <div class="stat-num" id="s-total">0</div>
+            <div class="stat-lbl">Total</div>
+          </div>
+          <div class="stat applied">
+            <div class="stat-num" id="s-applied">0</div>
+            <div class="stat-lbl">Applied</div>
+          </div>
+          <div class="stat skipped">
+            <div class="stat-num" id="s-skipped">0</div>
+            <div class="stat-lbl">Skipped</div>
+          </div>
+          <div class="stat failed">
+            <div class="stat-num" id="s-failed">0</div>
+            <div class="stat-lbl">Failed</div>
+          </div>
+        </div>
+
+        <div class="log-console" id="log-console"></div>
+      </div>
+
+      <!-- Job Results -->
+      <div class="card section-gap">
+        <div class="card-title"><span class="icon">📋</span> Job Results</div>
+        <div class="job-list" id="job-list">
+          <div class="empty-state" id="job-list-empty">
+            <div class="empty-icon">📭</div>
+            <div>Results will appear here as jobs are processed…</div>
           </div>
         </div>
       </div>
+    </div>
 
-      <!-- Empty state when nothing is running -->
-      <div id="idle-panel">
-        <div class="card" style="text-align:center;padding:3rem 2rem">
-          <div style="font-size:48px;margin-bottom:1rem;opacity:0.6">🚀</div>
-          <div style="font-size:16px;font-weight:600;margin-bottom:.5rem">Ready to Launch</div>
-          <div style="color:var(--text-muted);font-size:13px;max-width:300px;margin:0 auto">
-            Fill in your search criteria and candidate profile, then hit
-            <strong style="color:var(--accent)">Start Automation</strong> to begin.
-          </div>
+    <!-- Diagnostics Panel -->
+    <div id="diag-panel" style="display:none">
+      <div class="card">
+        <div class="card-title"><span class="icon">🗂</span> Captured Diagnostics</div>
+        <div id="diag-content">
+          <ul class="diag-list" id="diag-list">
+            <li style="color:var(--text-muted);cursor:default">Click "Diagnostics" to load…</li>
+          </ul>
+          <div id="diag-detail"></div>
         </div>
       </div>
+    </div>
 
-    </div><!-- /right column -->
+    <!-- Idle Panel -->
+    <div id="idle-panel">
+      <div class="card" style="text-align:center;padding:3rem 2rem">
+        <div style="font-size:48px;margin-bottom:1rem;opacity:0.6">🚀</div>
+        <div style="font-size:16px;font-weight:600;margin-bottom:.5rem">Ready to Launch</div>
+        <div style="color:var(--text-muted);font-size:13px;max-width:300px;margin:0 auto">
+          Fill in your search criteria and candidate profile, then hit
+          <strong style="color:var(--accent)">Start Automation</strong> to begin.
+        </div>
+      </div>
+    </div>
 
-  </div><!-- /content -->
+  </div>
+
+  <div class="modal-backdrop" id="resume-preview-modal" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-label="Generated resume preview">
+      <div class="modal-header">
+        <h4>Generated Resume Preview</h4>
+        <button class="btn btn-outline" type="button" onclick="closeResumePreview()">✕ Close</button>
+      </div>
+      <div class="modal-body">
+        <iframe id="resume-preview-frame" title="Generated Resume Preview"></iframe>
+      </div>
+    </div>
+  </div>
+
 </div><!-- /shell -->
-
-<!-- ═══ BOTTOM BAR ═══════════════════════════════════════════════════════ -->
-<div class="bottom-bar legacy-hidden">
-  <button class="btn btn-outline btn-ghost" onclick="resetRunUI()">↻ Reset</button>
-  <button class="btn btn-primary" id="bottom-start-btn" onclick="startRun()">▶ Start Automation</button>
-  <button class="btn btn-danger" id="bottom-stop-btn" disabled onclick="stopRun()">■ Stop</button>
-</div>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════════════
    STATE
    ═══════════════════════════════════════════════════════════════════════════ */
 let resumePath  = null;
+let resumePreviewUrl = null;
 let resumeMode  = 'upload';
 let profileMode = 'manual';
 let abortCtrl   = null;
@@ -1671,7 +2176,13 @@ let totalJobs   = 0;
 let counts      = { applied: 0, skipped: 0, failed: 0 };
 let isRunning   = false;
 
-const API = (window.location.protocol === 'file:') ? 'http://localhost:8000' : window.location.origin;
+// Default to backend on localhost:8000 when the frontend is served
+// from a different origin (e.g. python static server on :8080) or
+// when opened via file://. If the page is already served by the
+// backend (origin includes :8000), use the same origin.
+const API = (window.location.protocol === 'file:' || (window.location.port && window.location.port !== '8000'))
+  ? 'http://127.0.0.1:8000'
+  : window.location.origin;
 
 const ROLE_TEMPLATES = {
   'Java Developer + C2C': {
@@ -1782,7 +2293,7 @@ document.getElementById('file-input').addEventListener('change', async (e) => {
   if (file) await uploadResume(file);
 });
 
-['name', 'target_role', 'email', 'phone', 'location', 'technical_skills', 'projects', 'cover_text', 'resume_focus', 'resume_notes', 'linkedin_email', 'linkedin_password', 'gmail_address', 'gmail_app_password', 'keywords', 'job_url', 'search_url', 'ai_tailor_email', 'ai_tailor_resume_pdf'].forEach((id) => {
+['name', 'target_role', 'email', 'phone', 'location', 'technical_skills', 'projects', 'cover_text', 'resume_focus', 'resume_notes', 'linkedin_email', 'linkedin_password', 'gmail_address', 'gmail_app_password', 'portal_email', 'portal_password', 'keywords', 'job_url', 'search_url', 'ai_tailor_email', 'ai_tailor_resume_pdf'].forEach((id) => {
   const el = document.getElementById(id);
   if (el) {
     el.addEventListener('input', refreshResumePreview);
@@ -1809,9 +2320,10 @@ async function uploadResume(file) {
   fd.append('file', file);
   try {
     const res  = await fetch(`${API}/api/upload-resume`, { method: 'POST', body: fd });
-    const data = await res.json();
+    const data = await readApiResponse(res);
     if (data.path) {
       resumePath = data.path;
+      resumePreviewUrl = resolvePreviewUrl(data.preview_url || `/uploads/${data.filename || data.path.split(/[\\/]/).pop()}`);
       nameEl.textContent = `✓ ${data.filename}`;
       nameEl.style.color = 'var(--success)';
       refreshResumePreview();
@@ -1853,6 +2365,54 @@ function setResumeMode(mode) {
   refreshResumePreview();
 }
 
+function updatePreviewControls() {
+  const button = document.getElementById('preview-resume-btn');
+  if (!button) return;
+  button.disabled = !resumePreviewUrl;
+}
+
+function resolvePreviewUrl(value) {
+  if (!value) return null;
+  try {
+    return new URL(value, API).href;
+  } catch {
+    return null;
+  }
+}
+
+function setChoiceValue(inputId, value, button) {
+  const input = document.getElementById(inputId);
+  if (input) {
+    input.value = value;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  const group = button?.closest('[data-choice-group]');
+  if (group) {
+    group.querySelectorAll('.choice-card, .simple-choice').forEach((card) => {
+      card.classList.toggle('active', card === button);
+    });
+  }
+  refreshResumePreview();
+}
+
+function selectSearchKeyword(button) {
+  const roleName = button.dataset.role || 'Java Developer + C2C';
+  setChoiceValue('keywords', roleName, button);
+  setTargetRole(button);
+
+  const setupProfileBadge = document.getElementById('setup-profile-badge');
+  if (setupProfileBadge) {
+    setupProfileBadge.textContent = `👤 ${roleName.replace(/\s*\+\s*C2C$/i, '')}`;
+  }
+}
+
+function syncChoiceGroupActiveState(inputId, selector) {
+  const value = document.getElementById(inputId)?.value;
+  document.querySelectorAll(selector).forEach((button) => {
+    button.classList.toggle('active', button.dataset.choiceValue === value || button.dataset.role === value);
+  });
+}
+
 function setProfileMode(mode) {
   profileMode = mode;
   const manualCard = document.getElementById('profile-manual-card');
@@ -1863,7 +2423,7 @@ function setProfileMode(mode) {
   const modeHidden = document.getElementById('profile_mode');
   if (modeHidden) modeHidden.value = mode;
 
-  setProfileFieldsEditable(mode === 'ai');
+  setProfileFieldsEditable(mode === 'manual');
 
   // AI mode can auto-seed role-based content, manual mode leaves fields editable.
   const selectedChip = document.querySelector('.role-chip.active') || document.querySelector('.role-chip[data-role="Java Developer + C2C"]');
@@ -1884,6 +2444,14 @@ function setTargetRole(button) {
   if (focusInput && (template?.focus || button.dataset.focus)) {
     focusInput.value = template?.focus || button.dataset.focus || '';
   }
+
+  const keywordInput = document.getElementById('keywords');
+  if (keywordInput) {
+    keywordInput.value = roleName;
+  }
+  document.querySelectorAll('[data-choice-group="keywords"] .simple-choice, [data-choice-group="keywords"] .choice-card').forEach((chip) => {
+    chip.classList.toggle('active', (chip.dataset.role || chip.dataset.choiceValue || '') === roleName);
+  });
 
   if (template && profileMode === 'ai') {
     const skillsInput = document.getElementById('technical_skills');
@@ -1961,6 +2529,7 @@ function resetProfileFields() {
     if (el) el.value = value;
   });
   resumePath = null;
+  resumePreviewUrl = null;
   profileMode = 'manual';
   const uploadName = document.getElementById('upload-name');
   if (uploadName) uploadName.textContent = 'No file selected yet';
@@ -1977,6 +2546,7 @@ function resetProfileFields() {
     setTargetRole(defaultChip);
   }
   refreshResumePreview();
+  updatePreviewControls();
 }
 
 async function generateResumeDraft() {
@@ -2008,6 +2578,7 @@ async function generateResumeDraft() {
       `Projects: ${projects}`,
     ].join('\n');
     refreshResumePreview();
+    updatePreviewControls();
     return;
   }
 
@@ -2026,12 +2597,13 @@ async function generateResumeDraft() {
       body: JSON.stringify(payload),
     });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `HTTP ${res.status}`);
+      const err = await readApiResponse(res).catch(() => ({}));
+      throw new Error(err.detail || err.message || `HTTP ${res.status}`);
     }
-    const data = await res.json();
+    const data = await readApiResponse(res);
     if (data.path) {
       resumePath = data.path;
+      resumePreviewUrl = resolvePreviewUrl(data.preview_url || `/uploads/${data.filename || data.path.split(/[\\/]/).pop()}`);
       const uploadName = document.getElementById('upload-name');
       if (uploadName) {
         uploadName.textContent = `✓ ${data.filename || 'generated resume.pdf'}`;
@@ -2046,6 +2618,7 @@ async function generateResumeDraft() {
         `Projects: ${projects}`,
       ].join('\n');
       refreshResumePreview();
+      updatePreviewControls();
     }
   } catch (err) {
     document.getElementById('preview-summary').textContent = `Resume generation failed: ${err.message}`;
@@ -2054,6 +2627,16 @@ async function generateResumeDraft() {
       button.disabled = false;
       button.textContent = originalLabel || '✨ Generate Resume PDF';
     }
+  }
+}
+
+async function readApiResponse(res) {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(text.slice(0, 240) || `HTTP ${res.status}`);
   }
 }
 
@@ -2115,7 +2698,36 @@ function refreshResumePreview() {
       previewSummary.textContent = [previewSummary.textContent.trim(), ...extraNotes].join('\n');
     }
   }
+
+  updatePreviewControls();
 }
+
+function openResumePreview() {
+  if (!resumePreviewUrl) return;
+  const modal = document.getElementById('resume-preview-modal');
+  const frame = document.getElementById('resume-preview-frame');
+  if (frame) frame.src = resolvePreviewUrl(resumePreviewUrl) || resumePreviewUrl;
+  if (modal) {
+    modal.classList.add('visible');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+}
+
+function closeResumePreview() {
+  const modal = document.getElementById('resume-preview-modal');
+  const frame = document.getElementById('resume-preview-frame');
+  if (frame) frame.src = 'about:blank';
+  if (modal) {
+    modal.classList.remove('visible');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+}
+
+document.getElementById('resume-preview-modal')?.addEventListener('click', (event) => {
+  if (event.target && event.target.id === 'resume-preview-modal') {
+    closeResumePreview();
+  }
+});
 
 function syncRoleSelectionFromInput() {
   const currentRole = v('target_role');
@@ -2136,19 +2748,24 @@ function syncRoleSelectionFromInput() {
    FORM VALIDATION
    ═══════════════════════════════════════════════════════════════════════════ */
 function validateForm() {
-  const kw  = v('keywords');
-  const su  = v('search_url');
-  const ju  = v('job_url');
+  const kw = v('keywords');
+  const su = v('search_url');
+  const ju = v('job_url');
 
   // Clear previous errors
-  ['keywords', 'search_url', 'job_url'].forEach(id => {
-    document.getElementById(id).classList.remove('error');
+  ['keywords', 'job_url'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('error');
   });
+  const searchEl = document.getElementById('search_url');
+  if (searchEl) searchEl.classList.remove('error');
 
   if (!kw && !su && !ju) {
-    ['keywords', 'search_url', 'job_url'].forEach(id => {
-      document.getElementById(id).classList.add('error');
+    ['keywords', 'job_url'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.add('error');
     });
+    if (searchEl) searchEl.classList.add('error');
     logLine('error', 'Please provide at least one of: Keywords, Search URL, or Job URL.');
     return false;
   }
@@ -2170,12 +2787,14 @@ function buildPayload() {
     search_url: v('search_url') || null,
     job_url:    v('job_url')    || null,
     max_jobs:   parseInt(v('max_jobs')) || 5,
-    headless:   !document.getElementById('headless').checked,
+    headless:   !(document.getElementById('headless')?.checked || document.getElementById('show_browser')?.checked),
     login_credentials: {
       linkedin_email:    v('linkedin_email')    || null,
       linkedin_password: v('linkedin_password') || null,
       gmail_address:     v('gmail_address')     || null,
       gmail_app_password: v('gmail_app_password') || null,
+      portal_email:      v('portal_email')      || null,
+      portal_password:   v('portal_password')   || null,
     },
     candidate: {
       name:         v('name'),
@@ -2192,12 +2811,28 @@ function buildPayload() {
       location:     v('location')     || null,
       linkedin_url: v('linkedin_url') || null,
       resume_path:  resumePath,
+      us_citizen: v('us_citizen'),
+      visa_sponsorship_required: v('visa_sponsorship_required'),
+      security_clearance: v('security_clearance'),
+      clearance_type: v('clearance_type'),
+      clearance_date: v('clearance_date'),
+      preferred_location: v('preferred_location'),
+      willing_to_relocate: v('willing_to_relocate'),
+      work_authorization: v('work_authorization'),
+      gender: v('gender'),
+      ethnicity: v('ethnicity'),
+      veteran_status: v('veteran_status'),
+      disability_status: v('disability_status'),
+      salary_expectation: v('salary_expectation'),
+      notice_period: v('notice_period'),
+      years_of_experience: v('years_of_experience'),
+      custom_answers_text: v('custom_answers_text'),
     },
     filters: {
-      posted_within_hours: parseInt(document.getElementById('posted_within_hours').value) || 24,
+      posted_within_hours: parseInt(v('posted_within_hours')) || 24,
       locations:           locations,
-      easy_apply_only:     document.getElementById('easy_apply_only').checked,
-      remote_only:         document.getElementById('remote_only').checked,
+      easy_apply_only:     document.getElementById('easy_apply_only')?.checked ?? false,
+      remote_only:         document.getElementById('remote_only')?.checked ?? false,
       extra_params: {
         search_in: v('search_in') || 'linkedin_jobs',
       },
@@ -2212,6 +2847,20 @@ async function startRun() {
   if (isRunning) return;
 
   if (!validateForm()) return;
+
+  // Auto-generate resume if missing
+  if (resumeMode === 'generate' && !resumePath && document.getElementById('ai_tailor_resume_pdf')?.checked) {
+    document.getElementById('run-panel').style.display = 'block';
+    document.getElementById('idle-panel').style.display = 'none';
+    setRunning(true);
+    logLine('system', 'Auto-generating role-specific resume PDF…');
+    await generateResumeDraft();
+    if (!resumePath) {
+      logLine('error', 'Failed to auto-generate resume. Aborting run.');
+      setRunning(false);
+      return;
+    }
+  }
 
   const payload = buildPayload();
 
@@ -2281,22 +2930,18 @@ function setRunning(running) {
   isRunning = running;
   const startBtn    = document.getElementById('start-btn');
   const stopBtn     = document.getElementById('stop-btn');
-  const btmStart    = document.getElementById('bottom-start-btn');
-  const btmStop     = document.getElementById('bottom-stop-btn');
   const spinner     = document.getElementById('start-spinner');
   const btnText     = document.getElementById('start-btn-text');
 
-  startBtn.disabled = running;
-  stopBtn.disabled  = !running;
-  btmStart.disabled = running;
-  btmStop.disabled  = !running;
+  if (startBtn) startBtn.disabled = running;
+  if (stopBtn)  stopBtn.disabled  = !running;
 
   if (running) {
-    spinner.classList.add('active');
-    btnText.textContent = 'Running…';
+    if (spinner) spinner.classList.add('active');
+    if (btnText) btnText.textContent = 'Running…';
   } else {
-    spinner.classList.remove('active');
-    btnText.textContent = '▶ Start Automation';
+    if (spinner) spinner.classList.remove('active');
+    if (btnText) btnText.textContent = '▶ Start Automation';
   }
 }
 
@@ -2429,24 +3074,29 @@ function updatePills() {
 function resetRunUI() {
   processed = 0;
   totalJobs = 0;
-  counts    = { applied: 0, skipped: 0, failed: 0 };
+  counts = { applied: 0, skipped: 0, failed: 0 };
   updateStats();
   setProgress(0);
   updatePills();
-  document.getElementById('log-console').innerHTML = '';
-  document.getElementById('job-list').innerHTML =
-    '<div class="empty-state" id="job-list-empty"><div class="empty-icon">📭</div><div>Results will appear here as jobs are processed…</div></div>';
-  document.getElementById('manual-alert').classList.remove('visible');
-  document.getElementById('s-total').textContent = '0';
+  const logEl = document.getElementById('log-console');
+  if (logEl) logEl.innerHTML = '';
+  const jobList = document.getElementById('job-list');
+  if (jobList) jobList.innerHTML = '<div class="empty-state" id="job-list-empty"><div class="empty-icon">📭</div><div>Results will appear here as jobs are processed…</div></div>';
+  const manualAlert = document.getElementById('manual-alert');
+  if (manualAlert) manualAlert.classList.remove('visible');
+  const sTotal = document.getElementById('s-total');
+  if (sTotal) sTotal.textContent = '0';
 
-  // Restore panel visibility
-  document.getElementById('run-panel').style.display = 'none';
-  document.getElementById('idle-panel').style.display = '';
-  document.getElementById('diag-panel').style.display = 'none';
+  const runPanel = document.getElementById('run-panel');
+  if (runPanel) runPanel.style.display = 'none';
+  const idlePanel = document.getElementById('idle-panel');
+  if (idlePanel) idlePanel.style.display = '';
+  const diagPanel = document.getElementById('diag-panel');
+  if (diagPanel) diagPanel.style.display = 'none';
 
-  // Clear validation errors
-  ['keywords', 'search_url', 'job_url'].forEach(id => {
-    document.getElementById(id).classList.remove('error');
+  ['keywords', 'job_url', 'search_url'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('error');
   });
 
   setRunning(false);

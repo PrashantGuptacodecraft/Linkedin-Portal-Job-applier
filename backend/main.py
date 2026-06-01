@@ -49,10 +49,16 @@ from loguru import logger
 
 import aiofiles
 
-from config import DIAGNOSTICS_DIR, UPLOADS_DIR
-from models import AutoApplyRequest, CandidateProfile, SessionSummary
-from orchestrator import run_pipeline
-from resume_generator import generate_resume
+try:
+    from .config import DIAGNOSTICS_DIR, UPLOADS_DIR
+    from .models import AutoApplyRequest, CandidateProfile, SessionSummary
+    from .orchestrator import run_pipeline
+    from .resume_generator import generate_resume
+except ImportError:
+    from config import DIAGNOSTICS_DIR, UPLOADS_DIR
+    from models import AutoApplyRequest, CandidateProfile, SessionSummary
+    from orchestrator import run_pipeline
+    from resume_generator import generate_resume
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
@@ -73,6 +79,10 @@ app.add_middleware(
 # ── Resume upload ─────────────────────────────────────────────────────────────
 
 _MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _preview_url_for_upload(path: str) -> str:
+    return f"/uploads/{Path(path).name}"
 
 
 @app.post("/api/upload-resume")
@@ -104,7 +114,7 @@ async def upload_resume(file: UploadFile = File(...)):
         await fh.write(content)
 
     logger.info(f"Resume saved → {dest}")
-    return {"path": str(dest), "filename": file.filename}
+    return {"path": str(dest), "filename": file.filename, "preview_url": _preview_url_for_upload(str(dest))}
 
 
 # ── Playwright thread helper ─────────────────────────────────────────────────
@@ -119,6 +129,7 @@ def _run_pipeline_in_thread(
     req: AutoApplyRequest,
     queue: asyncio.Queue,
     main_loop: asyncio.AbstractEventLoop,
+    stop_event: threading.Event = None,
     *,
     apply_external: bool = True,
 ):
@@ -134,7 +145,7 @@ def _run_pipeline_in_thread(
     async def _inner():
         try:
             logger.info("Pipeline thread: starting pipeline…")
-            await run_pipeline(req, emit=emit, apply_external=apply_external)
+            await run_pipeline(req, emit=emit, apply_external=apply_external, stop_event=stop_event)
         except Exception as exc:
             tb = traceback.format_exc()
             logger.error(f"Pipeline thread uncaught: {exc}\n{tb}")
@@ -221,8 +232,8 @@ async def _generate_resume_async(candidate: CandidateProfile) -> str:
     def _thread_target():
         async def _inner():
             try:
-                # generate_resume is synchronous (may merge overlay + template)
-                generated_path = generate_resume(candidate, str(output_path))
+                # generate_resume is now async
+                generated_path = await generate_resume(candidate, str(output_path))
                 loop.call_soon_threadsafe(result_future.set_result, generated_path)
             except Exception as exc:
                 loop.call_soon_threadsafe(result_future.set_exception, exc)
@@ -259,18 +270,19 @@ async def auto_apply(req: AutoApplyRequest):
     """
     main_loop = asyncio.get_running_loop()
     queue: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue()
+    stop_event = threading.Event()
 
     # Launch pipeline in a background thread
     thread = threading.Thread(
         target=_run_pipeline_in_thread,
-        args=(req, queue, main_loop),
+        args=(req, queue, main_loop, stop_event),
         kwargs={"apply_external": True},
         daemon=True,
     )
     thread.start()
 
     return StreamingResponse(
-        _sse_generator(queue),
+        _sse_generator(queue, stop_event),
         media_type="text/event-stream",
         headers={
             "Cache-Control":            "no-cache",
@@ -281,7 +293,7 @@ async def auto_apply(req: AutoApplyRequest):
 
 
 @app.post("/api/generate-resume")
-async def generate_resume(req: AutoApplyRequest):
+async def generate_resume_endpoint(req: AutoApplyRequest):
     """Generate a role-aware PDF resume and return its server path."""
     if not req.candidate.name and not req.candidate.target_role:
         raise HTTPException(status_code=400, detail="Candidate profile and target role are required.")
@@ -295,6 +307,7 @@ async def generate_resume(req: AutoApplyRequest):
                 "filename": Path(req.candidate.resume_path).name,
                 "target_role": req.candidate.target_role,
                 "mode": "manual",
+                "preview_url": _preview_url_for_upload(req.candidate.resume_path),
             }
 
     generated_path = await _generate_resume_async(req.candidate)
@@ -303,29 +316,37 @@ async def generate_resume(req: AutoApplyRequest):
         "filename": Path(generated_path).name,
         "target_role": req.candidate.target_role,
         "mode": "ai",
+        "preview_url": _preview_url_for_upload(generated_path),
     }
 
 
 async def _sse_generator(
     queue: asyncio.Queue[Dict[str, Any] | None],
+    stop_event: threading.Event = None,
 ) -> AsyncGenerator[str, None]:
     """Yield SSE-formatted strings from the event queue."""
     keepalive_interval = 15   # seconds
-    while True:
-        try:
-            event = await asyncio.wait_for(queue.get(), timeout=keepalive_interval)
-        except asyncio.TimeoutError:
-            yield ": keepalive\n\n"
-            continue
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=keepalive_interval)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
 
-        if event is None:          # sentinel – run is complete
-            yield "data: {\"type\": \"done\"}\n\n"
-            break
+            if event is None:          # sentinel – run is complete
+                yield "data: {\"type\": \"done\"}\n\n"
+                break
 
-        try:
-            yield f"data: {json.dumps(event)}\n\n"
-        except Exception as exc:
-            logger.debug(f"SSE serialise error: {exc}")
+            try:
+                yield f"data: {json.dumps(event)}\n\n"
+            except Exception as exc:
+                logger.debug(f"SSE serialise error: {exc}")
+    except asyncio.CancelledError:
+        logger.info("Client disconnected (Stop), signalling pipeline to stop.")
+        if stop_event:
+            stop_event.set()
+        raise
 
 
 # ── Diagnostics endpoints ─────────────────────────────────────────────────────
@@ -387,6 +408,7 @@ async def health():
 
 _STATIC = Path(__file__).parent.parent / "frontend" / "dist"
 _FRONTEND = Path(__file__).parent.parent / "frontend"
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 if _STATIC.exists():
     app.mount("/", StaticFiles(directory=str(_STATIC), html=True), name="static")
 elif _FRONTEND.exists():
@@ -398,7 +420,7 @@ elif _FRONTEND.exists():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "main:app",
+        "backend.main:app",
         host="0.0.0.0",
         port=8000,
         reload=True,
