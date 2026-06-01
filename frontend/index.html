@@ -1129,6 +1129,9 @@ input.error, textarea.error {
       <div class="stat-pill disconnected" id="backend-status">API: checking…</div>
       <div class="stat-pill" id="jobs-found-pill">0 JOBS</div>
       <div class="stat-pill" id="progress-pill">0% DONE</div>
+      <div style="width:12px"></div>
+      <button class="btn btn-primary" id="top-start-btn" onclick="startRun()">▶ Start Automation</button>
+      <button class="btn btn-danger" id="top-stop-btn" disabled onclick="stopRun()">■ Stop</button>
     </div>
   </div>
 
@@ -1671,7 +1674,12 @@ let totalJobs   = 0;
 let counts      = { applied: 0, skipped: 0, failed: 0 };
 let isRunning   = false;
 
-const API = (window.location.protocol === 'file:') ? 'http://localhost:8000' : window.location.origin;
+const API = (() => {
+  const localBackend = 'http://localhost:8000';
+  if (window.location.protocol === 'file:') return localBackend;
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') return localBackend;
+  return window.location.origin;
+})();
 
 const ROLE_TEMPLATES = {
   'Java Developer + C2C': {
@@ -2281,15 +2289,19 @@ function setRunning(running) {
   isRunning = running;
   const startBtn    = document.getElementById('start-btn');
   const stopBtn     = document.getElementById('stop-btn');
+  const topStart    = document.getElementById('top-start-btn');
+  const topStop     = document.getElementById('top-stop-btn');
   const btmStart    = document.getElementById('bottom-start-btn');
   const btmStop     = document.getElementById('bottom-stop-btn');
   const spinner     = document.getElementById('start-spinner');
   const btnText     = document.getElementById('start-btn-text');
 
-  startBtn.disabled = running;
-  stopBtn.disabled  = !running;
-  btmStart.disabled = running;
-  btmStop.disabled  = !running;
+  if (startBtn) startBtn.disabled = running;
+  if (stopBtn) stopBtn.disabled  = !running;
+  if (topStart) topStart.disabled = running;
+  if (topStop) topStop.disabled  = !running;
+  if (btmStart) btmStart.disabled = running;
+  if (btmStop) btmStop.disabled  = !running;
 
   if (running) {
     spinner.classList.add('active');
