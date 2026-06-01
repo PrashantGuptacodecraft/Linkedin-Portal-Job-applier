@@ -454,9 +454,15 @@ async def extract_job_details(page: Page, job_url: str) -> JobResult:
             raw_text = (await apply_btn.inner_text()) or ""
             clean_text = re.sub(r"[^\x20-\x7E]", "", raw_text).strip().lower()
             if any(t in clean_text for t in _EASY_APPLY_TEXTS):
-                result.status    = JobStatus.SKIPPED
-                result.error     = "Easy Apply – handled separately (not external portal)"
+                # Mark Easy Apply jobs as actionable: set them to PENDING and
+                # point apply_url at the job page. This allows the orchestrator
+                # to attempt an in-site (LinkedIn modal) apply instead of
+                # skipping the job outright.
                 result.apply_type = "easy_apply"
+                result.apply_url = job_url
+                result.external_url = None
+                result.job_url = job_url
+                result.status = JobStatus.PENDING
             else:
                 # Detect external icon or explicit page text indicating external apply
                 is_external_icon = False
