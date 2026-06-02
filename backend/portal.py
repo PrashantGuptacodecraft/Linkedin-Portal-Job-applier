@@ -220,25 +220,78 @@ async def autofill_portal_form(
             break
 
     if not adapter_matched:
-        logger.info("No static adapter matched. Falling back to Universal AI Handler.")
+        # ── Layer 2: Semantic fill (reliable, no AI needed) ───────────────
+        logger.info("No static adapter matched. Running semantic fill layers first...")
         if emit:
-            emit({"type": "log", "level": "info", "message": "Initializing AI-powered application flow..."})
-        filled += await _ai_fallback_handler(page, candidate, login_credentials, emit)
+            emit({"type": "log", "level": "info", "message": "Running semantic form fill..."})
+        semantic_filled = await _semantic_fill(page, candidate)
+        filled += semantic_filled
+        logger.info(f"Semantic fill: {semantic_filled} field(s)")
+
+        # ── Layer 2b: React phone input ───────────────────────────────────
+        try:
+            phone_filled = await _fill_react_phone_input(page, candidate)
+            filled += phone_filled
+        except Exception as exc:
+            logger.debug(f"React phone fill error: {exc}")
+
+        # ── Layer 3: Ant Design custom selects ────────────────────────────
+        try:
+            ant_filled = await _fill_ant_design_selects(page, candidate)
+            filled += ant_filled
+        except Exception as exc:
+            logger.debug(f"Ant Design select fill error: {exc}")
+
+        # ── Layer 4: Native dropdown selects ──────────────────────────────
+        try:
+            dd_filled = await _fill_dropdowns(page, candidate)
+            filled += dd_filled
+        except Exception as exc:
+            logger.debug(f"Dropdown fill error: {exc}")
+
+        # ── Layer 5: Resume upload ────────────────────────────────────────
+        if candidate.resume_path:
+            try:
+                upload_filled = await _upload_resume_basic(page, candidate.resume_path)
+                filled += upload_filled
+            except Exception as exc:
+                logger.debug(f"Resume upload error: {exc}")
+
+        # ── Layer 6: Dispatch React events to register values ─────────────
+        try:
+            await _dispatch_react_events(page)
+        except Exception as exc:
+            logger.debug(f"React event dispatch error: {exc}")
+
+        # ── Layer 7: AI fallback (only if semantic fill got very few fields)
+        if filled < 2:
+            logger.info(f"Semantic fill got only {filled} field(s). Trying AI fallback...")
+            if emit:
+                emit({"type": "log", "level": "info", "message": "Initializing AI-powered application flow..."})
+            try:
+                ai_filled = await _ai_fallback_handler(page, candidate, login_credentials, emit)
+                filled += ai_filled
+            except Exception as exc:
+                logger.error(f"AI fallback handler crashed: {exc}")
+                if emit:
+                    emit({"type": "log", "level": "warning", "message": f"AI handler error: {exc}"})
+        else:
+            logger.info(f"Semantic fill sufficient ({filled} fields). Skipping AI handler.")
+            if emit:
+                emit({"type": "log", "level": "info", "message": f"Filled {filled} field(s) via semantic matching."})
 
     logger.info(f"Portal autofill complete – {filled} field(s) filled.")
     return page, filled, portal_state
 
 async def _discover_and_click_apply(page) -> int:
-    """Look for 'Apply', 'Apply Now', 'Submit Application' buttons and click them."""
+    """Look for 'Apply', 'Apply Now' buttons and click them to open the form.
+    IMPORTANT: Do NOT click 'Submit', 'Send application', or form submit buttons."""
+    # Only look for buttons that OPEN the application form, not submit it
     apply_selectors = [
         "button:has-text('Apply Now')",
         "a:has-text('Apply Now')",
         "button:has-text('Apply for this job')",
         "a:has-text('Apply for this job')",
-        "button:has-text('Submit Application')",
-        "a:has-text('Submit Application')",
-        "button:has-text('Apply')",
-        "a:has-text('Apply')",
         "button:has-text('Start Application')",
         "a:has-text('Start Application')",
         "[data-automation-id='applyButton']",
@@ -247,18 +300,39 @@ async def _discover_and_click_apply(page) -> int:
         "#apply-button",
         ".apply-btn",
     ]
+    # Words that indicate a SUBMIT action (not an open-form action)
+    submit_words = [
+        "applied", "close", "cancel", "submit", "send",
+        "confirm", "done", "finish", "complete", "save",
+    ]
     for sel in apply_selectors:
         try:
             btn = await page.query_selector(sel)
             if btn and await btn.is_visible():
                 btn_text = (await btn.inner_text()).strip().lower()
-                # Avoid clicking "applied" or "close" buttons
-                if "applied" in btn_text or "close" in btn_text or "cancel" in btn_text:
+                # Skip if the button text contains submit-like words
+                if any(w in btn_text for w in submit_words):
+                    logger.debug(f"Skipping submit-like button: '{btn_text}'")
                     continue
+                # Skip if form fields are already visible (form is already open)
+                form_fields = await page.query_selector_all(
+                    "input[type='text']:visible, input[type='email']:visible, "
+                    "input[type='tel']:visible, textarea:visible"
+                )
+                visible_count = 0
+                for f in form_fields[:5]:
+                    try:
+                        if await f.is_visible():
+                            visible_count += 1
+                    except Exception:
+                        pass
+                if visible_count >= 2:
+                    logger.debug(f"Form fields already visible ({visible_count}), skipping apply button click")
+                    return 0
                 await btn.click()
                 await human_delay(1.5, 3.0)
                 logger.info(f"Clicked apply button: {sel}")
-                return 0  # don't count button click as a filled field
+                return 0
         except Exception:
             continue
     return 0
@@ -437,23 +511,29 @@ def _profile_as_field_map(c: CandidateProfile) -> Dict[str, str]:
         "name":         c.name,
         "candidate name": c.name,
         "applicant name": c.name,
-        # first / last name
+        # first / last name (including Ant Design dot-notation IDs)
         "first name":   name_parts[0],
         "first_name":   name_parts[0],
         "firstname":    name_parts[0],
         "given name":   name_parts[0],
         "given_name":   name_parts[0],
+        "name first name": name_parts[0],    # matches "name.first_name" after normalization
+        "name first":   name_parts[0],
         "last name":    name_parts[1] if len(name_parts) > 1 else "",
         "last_name":    name_parts[1] if len(name_parts) > 1 else "",
         "lastname":     name_parts[1] if len(name_parts) > 1 else "",
         "surname":      name_parts[1] if len(name_parts) > 1 else "",
         "family name":  name_parts[1] if len(name_parts) > 1 else "",
         "family_name":  name_parts[1] if len(name_parts) > 1 else "",
+        "name last name": name_parts[1] if len(name_parts) > 1 else "",  # matches "name.last_name"
+        "name last":    name_parts[1] if len(name_parts) > 1 else "",
         # contact
         "email":        c.email,
         "email address": c.email,
         "e mail":       c.email,
         "emailaddress": c.email,
+        "contact email": c.email,
+        "your contact email": c.email,      # matches E-Logic placeholder
         "phone":        c.phone,
         "phone number": c.phone,
         "telephone":    c.phone,
@@ -462,14 +542,32 @@ def _profile_as_field_map(c: CandidateProfile) -> Dict[str, str]:
         "mobile number": c.phone,
         "cell phone":   c.phone,
         "contact number": c.phone,
-        # location
+        # location / address (including Ant Design form IDs)
         "location":     c.location or "",
         "city":         city,
         "town":         city,
+        "candidate city": city,               # matches "address.candidate_city"
+        "address candidate city": city,
+        "enter city":   city,                 # matches placeholder
         "state":        state_country,
         "province":     state_country,
+        "candidate state": state_country,     # matches "address.candidate_state"
+        "address candidate state": state_country,
         "country":      state_country,
+        "candidate country": state_country,   # matches "address.candidate_country"
+        "address candidate country": state_country,
         "address":      c.location or "",
+        "street":       "",                   # need to be filled via AI or left empty
+        "candidate address1": "",
+        "address candidate address1": "",
+        "enter street": "",
+        "postal code":  "",
+        "candidate postal code": "",
+        "address candidate postal code": "",
+        "enter postal code": "",
+        "zip":          "",
+        "zip code":     "",
+        "zipcode":      "",
         # cover letter
         "cover letter": c.cover_text,
         "cover_letter": c.cover_text,
@@ -487,7 +585,7 @@ def _profile_as_field_map(c: CandidateProfile) -> Dict[str, str]:
         "target role":  getattr(c, "target_role", "") or "",
         "desired position": getattr(c, "target_role", "") or "",
         "job title":    getattr(c, "target_role", "") or "",
-        # linkedin
+        # linkedin / portfolio
         "linkedin":     c.linkedin_url or "",
         "linkedin url": c.linkedin_url or "",
         "linkedin profile": c.linkedin_url or "",
@@ -495,6 +593,8 @@ def _profile_as_field_map(c: CandidateProfile) -> Dict[str, str]:
         "social media": c.linkedin_url or "",
         "website":      c.linkedin_url or "",
         "portfolio":    c.linkedin_url or "",
+        "portfolio link": c.linkedin_url or "",   # matches E-Logic "portfolio_link"
+        "enter link to your portfolio": c.linkedin_url or "",  # matches placeholder
     }
 
 
@@ -541,6 +641,23 @@ async def _semantic_fill(page: Page, candidate: CandidateProfile) -> int:
                 current = await inp.input_value()
                 if not current:         # don't overwrite pre-filled values
                     await inp.fill(str(value))
+                    # Dispatch React/Ant Design events so form state updates
+                    try:
+                        await inp.evaluate("""el => {
+                            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                                window.HTMLInputElement.prototype, 'value'
+                            )?.set || Object.getOwnPropertyDescriptor(
+                                window.HTMLTextAreaElement.prototype, 'value'
+                            )?.set;
+                            if (nativeInputValueSetter) {
+                                nativeInputValueSetter.call(el, el.value);
+                            }
+                            el.dispatchEvent(new Event('input', {bubbles: true}));
+                            el.dispatchEvent(new Event('change', {bubbles: true}));
+                            el.dispatchEvent(new FocusEvent('blur', {bubbles: true}));
+                        }""")
+                    except Exception:
+                        pass
                     await human_delay(0.4, 0.9)
                     filled_count += 1
         except Exception as exc:
@@ -675,6 +792,250 @@ async def _fill_dropdowns(page, candidate: CandidateProfile) -> int:
     except Exception as exc:
         logger.debug(f"Dropdown query error: {exc}")
     return filled
+
+
+# ── Layer 2b – React phone input ──────────────────────────────────────────────
+
+async def _fill_react_phone_input(page: Page, candidate: CandidateProfile) -> int:
+    """Handle react-tel-input and similar custom phone components.
+    These render a visible <input type='tel'> but hide the real form input.
+    We need to type into the visible input and dispatch events."""
+    filled = 0
+    if not candidate.phone:
+        return 0
+
+    try:
+        # Find react-tel-input containers
+        phone_inputs = await page.query_selector_all(
+            ".react-tel-input input[type='tel'], "
+            "input.form-control[type='tel'], "
+            "input[type='tel']"
+        )
+        for inp in phone_inputs:
+            try:
+                if not await inp.is_visible():
+                    continue
+                current = await inp.input_value()
+                # If only country code is present (e.g. "+91"), append the phone number
+                phone_num = candidate.phone.strip()
+                if current and current.startswith("+") and len(current) <= 5:
+                    # Has country code, just type the number part
+                    # Remove the country code from candidate phone if it starts with +
+                    if phone_num.startswith(current):
+                        phone_num = phone_num[len(current):]
+                    elif phone_num.startswith("+"):
+                        # Different country code, clear and type full number
+                        await inp.click(click_count=3)
+                        await inp.type(phone_num, delay=50)
+                        filled += 1
+                        continue
+                    await inp.click()
+                    await inp.press("End")
+                    await inp.type(phone_num, delay=50)
+                elif not current:
+                    await inp.type(phone_num, delay=50)
+                else:
+                    continue  # Already filled
+                # Dispatch events for React
+                await inp.evaluate("""el => {
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    el.dispatchEvent(new Event('blur', {bubbles: true}));
+                }""")
+                await human_delay(0.3, 0.7)
+                filled += 1
+                logger.info(f"Filled react phone input with: {phone_num}")
+                break  # Only fill the first phone input
+            except Exception as exc:
+                logger.debug(f"React phone input fill error: {exc}")
+    except Exception as exc:
+        logger.debug(f"React phone query error: {exc}")
+    return filled
+
+
+# ── Layer 3 – Ant Design custom select handling ──────────────────────────────
+
+async def _fill_ant_design_selects(page: Page, candidate: CandidateProfile) -> int:
+    """Handle Ant Design <Select> components which render as div.ant-select
+    instead of native <select> elements. These need click-to-open + option click."""
+    filled = 0
+    field_map = _profile_as_field_map(candidate)
+
+    try:
+        # Find all Ant Design select components
+        ant_selects = await page.query_selector_all(
+            "div.ant-select:not(.ant-select-disabled)"
+        )
+        for sel_el in ant_selects:
+            try:
+                if not await sel_el.is_visible():
+                    continue
+
+                # Get hints from id, label, or surrounding text
+                hints: List[str] = []
+                sel_id = await sel_el.get_attribute("id")
+                if sel_id:
+                    hints.append(sel_id.lower().replace("-", " ").replace("_", " ").replace(".", " "))
+                    # Check for associated label
+                    lbl = await page.query_selector(f"label[for='{sel_id}']")
+                    if lbl:
+                        lbl_text = await lbl.inner_text()
+                        hints.append(lbl_text.lower().strip())
+
+                # Also check parent container for label text
+                try:
+                    parent = await sel_el.evaluate_handle("el => el.closest('.ant-row.ant-form-item')")
+                    if parent:
+                        parent_label = await parent.query_selector("label")
+                        if parent_label:
+                            hints.append((await parent_label.inner_text()).lower().strip())
+                except Exception:
+                    pass
+
+                hint_str = " ".join(hints)
+                if not hint_str:
+                    continue
+
+                # Determine what value to select
+                desired_value = None
+                if any(k in hint_str for k in ["country", "nation"]):
+                    location = (candidate.location or "").lower()
+                    if "india" in location:
+                        desired_value = "India"
+                    elif "us" in location or "usa" in location or "united states" in location:
+                        desired_value = "United States"
+                    else:
+                        # Try to extract country from location string
+                        parts = (candidate.location or "").split(",")
+                        if parts:
+                            desired_value = parts[-1].strip()
+                elif any(k in hint_str for k in ["certificate", "degree", "education level"]):
+                    desired_value = "Bachelor"
+                elif any(k in hint_str for k in ["experience", "years"]):
+                    desired_value = candidate.years_of_experience or "2"
+                elif any(k in hint_str for k in ["source", "how did you hear", "referral"]):
+                    desired_value = "LinkedIn"
+                else:
+                    # Try generic matching
+                    value = _best_match(hints, field_map)
+                    if value:
+                        desired_value = value
+
+                if not desired_value:
+                    continue
+
+                # Click the select to open dropdown
+                selection_div = await sel_el.query_selector(".ant-select-selection")
+                if selection_div:
+                    await selection_div.click()
+                else:
+                    await sel_el.click()
+                await human_delay(0.5, 1.0)
+
+                # Wait for dropdown popup to appear
+                await page.wait_for_selector(
+                    "div.ant-select-dropdown:not(.ant-select-dropdown-hidden)",
+                    timeout=3000
+                )
+
+                # Find and click the matching option
+                options = await page.query_selector_all(
+                    "div.ant-select-dropdown:not(.ant-select-dropdown-hidden) li.ant-select-dropdown-menu-item, "
+                    "div.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item"
+                )
+                clicked = False
+                for opt in options:
+                    try:
+                        opt_text = (await opt.inner_text()).strip()
+                        if desired_value.lower() in opt_text.lower() or opt_text.lower() in desired_value.lower():
+                            await opt.click()
+                            await human_delay(0.3, 0.7)
+                            filled += 1
+                            clicked = True
+                            logger.info(f"Ant Design select '{hint_str}': selected '{opt_text}'")
+                            break
+                    except Exception:
+                        continue
+
+                if not clicked:
+                    # Close the dropdown by pressing Escape
+                    await page.keyboard.press("Escape")
+                    logger.debug(f"No matching option for '{desired_value}' in Ant select '{hint_str}'")
+
+            except Exception as exc:
+                logger.debug(f"Ant Design select fill error: {exc}")
+                try:
+                    await page.keyboard.press("Escape")
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.debug(f"Ant Design select query error: {exc}")
+    return filled
+
+
+# ── Layer 5 – Basic resume upload (consistent signature) ─────────────────────
+
+async def _upload_resume_basic(page: Page, resume_path: str) -> int:
+    """Find any file-input element and set the resume file path.
+    Returns 1 if an upload was performed, else 0.
+    This is the basic version used in the semantic fill pipeline."""
+    selectors = [
+        "input[type='file'][id*='resume' i]",
+        "input[type='file'][name*='resume' i]",
+        "input[type='file'][aria-label*='resume' i]",
+        "input[type='file'][id*='cv' i]",
+        "input[type='file'][name*='cv' i]",
+        "input[type='file'][aria-label*='cv' i]",
+        "[aria-label*='resume' i] input[type='file']",
+        "[aria-label*='cv' i] input[type='file']",
+        "input[type='file'][accept*='pdf']",
+        "input[type='file'][accept*='.doc']",
+        "input[type='file']",
+    ]
+    for sel in selectors:
+        try:
+            el = await page.query_selector(sel)
+            if el:
+                await el.set_input_files(resume_path)
+                await human_delay(1.0, 2.0)
+                logger.info(f"Resume uploaded via selector: {sel!r}")
+                return 1
+        except Exception as exc:
+            logger.debug(f"File upload attempt failed ({sel!r}): {exc}")
+    return 0
+
+
+# ── Layer 6 – Dispatch React/Ant Design events ──────────────────────────────
+
+async def _dispatch_react_events(page: Page) -> None:
+    """After filling inputs with Playwright's fill(), dispatch native DOM events
+    that React/Ant Design form decorators listen to. Without these, the form's
+    internal state may still show empty values even though the DOM shows text."""
+    try:
+        await page.evaluate("""() => {
+            const inputs = document.querySelectorAll(
+                'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]), textarea'
+            );
+            inputs.forEach(input => {
+                if (input.value && input.value.trim()) {
+                    // Trigger React synthetic event system
+                    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                        window.HTMLInputElement.prototype, 'value'
+                    )?.set || Object.getOwnPropertyDescriptor(
+                        window.HTMLTextAreaElement.prototype, 'value'
+                    )?.set;
+                    if (nativeInputValueSetter) {
+                        nativeInputValueSetter.call(input, input.value);
+                    }
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+                }
+            });
+        }""")
+        logger.info("Dispatched React/Ant Design form events on all filled inputs")
+    except Exception as exc:
+        logger.debug(f"React event dispatch failed: {exc}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1320,8 +1681,17 @@ async def map_form_fields(page: Page, candidate: CandidateProfile, client: Any, 
                             }
                         }
                         
+                        let cssSelector = '';
+                        if (i.id) {
+                            try { cssSelector = '#' + CSS.escape(i.id); } catch(e) {}
+                        }
+                        if (!cssSelector && i.name) {
+                            try { cssSelector = i.tagName.toLowerCase() + '[name="' + CSS.escape(i.name) + '"]'; } catch(e) {}
+                        }
+                        
                         return {
                             ai_id: aiId,
+                            css_selector: cssSelector,
                             frame_idx: frameIdx,
                             tag: i.tagName.toLowerCase(),
                             type: i.type || '',
@@ -1366,7 +1736,10 @@ async def map_form_fields(page: Page, candidate: CandidateProfile, client: Any, 
         if start != -1 and end != -1:
             data = json.loads(text[start:end])
             
+            ai_id_to_css = {el['ai_id']: el.get('css_selector', '') for el in all_elements}
+            
             for item in data:
+                item['css_selector'] = ai_id_to_css.get(item.get('ai_id'), '')
                 if item.get('source') == 'unknown':
                     ans = await ai_answer_unknown_field(item.get('label', ''), "text", candidate, GEMINI_API_KEY)
                     if ans:
@@ -1396,6 +1769,12 @@ async def fill_and_submit_mapped_fields(page: Page, fields: List[Dict], candidat
         try:
             target_frame = page.frames[frame_idx] if frame_idx < len(page.frames) else page
             el = await target_frame.query_selector(sel)
+            
+            if not el and field.get('css_selector'):
+                try:
+                    el = await target_frame.query_selector(field.get('css_selector'))
+                except Exception:
+                    pass
             
             if el and await el.is_visible():
                 tag = await el.evaluate("e => e.tagName.toLowerCase()")

@@ -556,13 +556,24 @@ async def _process_one_job(
         result.error = str(exc)
         _emit(emit, "log", level="warning", message=f"  ⚠ {exc}")
     except Exception as exc:
-        logger.error(f"Portal autofill error for {result.apply_url}: {exc}")
-        result.status = JobStatus.FAILED
-        result.error  = str(exc)
-        if portal_page:
-            result.diagnostics_dir = await diag.capture(
-                portal_page, f"portal_crash_{result.job_id}"
-            )
+        err_msg = str(exc)
+        if "MANUAL_REVIEW" in err_msg:
+            logger.warning(f"Manual review required for {result.apply_url}: {err_msg}")
+            result.status = JobStatus.MANUAL_REVIEW
+            result.error = err_msg
+            if portal_page:
+                result.diagnostics_dir = await diag.capture(
+                    portal_page, f"manual_review_{result.job_id}"
+                )
+            _emit(emit, "log", level="warning", message=f"  ⚠ {err_msg}")
+        else:
+            logger.error(f"Portal autofill error for {result.apply_url}: {exc}")
+            result.status = JobStatus.FAILED
+            result.error  = err_msg
+            if portal_page:
+                result.diagnostics_dir = await diag.capture(
+                    portal_page, f"portal_crash_{result.job_id}"
+                )
     finally:
         if portal_page:
             try:
