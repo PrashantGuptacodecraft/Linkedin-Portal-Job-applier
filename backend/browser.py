@@ -119,7 +119,7 @@ async def build_context(
     """
     har_path = str(DIAGNOSTICS_DIR / "session.har") if record_har else ""
 
-    logger.info(f"Launching Chrome (headless=False)")
+    logger.info(f"Launching Chrome (headless={headless})")
     try:
         browser = await playwright.chromium.launch(
             channel="chrome",

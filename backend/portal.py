@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-import asyncio
+
 from loguru import logger
-import time
 
 async def _call_gemini_with_retry(client, prompt: str, retries: int = 4) -> Any:
     """Wrapper around Gemini API calls to handle 429 Rate Limit and 503 errors."""
@@ -41,7 +41,6 @@ async def _call_gemini_with_retry(client, prompt: str, retries: int = 4) -> Any:
                 wait_time = 5.0
                 if "429" in err_str or "Quota exceeded" in err_str:
                     wait_time = 40.0
-                    import re
                     match = re.search(r'retry in ([0-9.]+)s', err_str)
                     if match:
                         wait_time = float(match.group(1)) + 1.0
@@ -52,7 +51,6 @@ async def _call_gemini_with_retry(client, prompt: str, retries: int = 4) -> Any:
                 raise e
 
 
-from loguru import logger
 from playwright.async_api import BrowserContext, Page, TimeoutError as PWTimeout
 
 try:
@@ -1276,7 +1274,6 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
     from .config import GEMINI_API_KEY, get_portal_credentials
     from .browser import human_delay
     from pathlib import Path
-    import asyncio
     import json
     
     if not GEMINI_API_KEY:
@@ -1560,7 +1557,6 @@ async def _pre_submit_validation(page: Page, candidate: CandidateProfile, client
 
 async def _handle_recaptcha_before_submit(page: Page, emit: Optional[Any]):
     """Upgrade 5: reCAPTCHA detection and handling."""
-    import asyncio
     try:
         recaptcha_iframe = await page.query_selector('iframe[src*="recaptcha"], div.g-recaptcha, div[data-sitekey]')
         is_robot_text = await page.evaluate("() => document.body.innerText.includes('I am not a robot')")
@@ -1593,7 +1589,6 @@ async def _handle_recaptcha_before_submit(page: Page, emit: Optional[Any]):
 async def _post_submit_confirmation(page: Page, emit: Optional[Any]):
     """Upgrade 7: Post-submit confirmation detection."""
     from .models import JobStatus
-    import asyncio
     try:
         success_indicators = ["confirmation", "thank-you", "thank_you", "success", "submitted", "complete", "apply-complete"]
         success_phrases = ["application submitted", "thank you for applying", "we have received your application", "application complete", "you have successfully applied", "your application has been received"]
