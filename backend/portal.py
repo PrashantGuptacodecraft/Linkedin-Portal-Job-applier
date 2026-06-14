@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-import asyncio
+
 from loguru import logger
-import time
 
 async def _call_gemini_with_retry(client, prompt: str, retries: int = 4) -> Any:
     """Wrapper around Gemini API calls to handle 429 Rate Limit and 503 errors."""
@@ -42,7 +42,7 @@ async def _call_gemini_with_retry(client, prompt: str, retries: int = 4) -> Any:
                 if "429" in err_str or "Quota exceeded" in err_str:
                     from .config import rotate_gemini_key, GEMINI_API_KEYS
                     import google.generativeai as genai
-                    
+
                     if len(GEMINI_API_KEYS) > 1:
                         new_key = rotate_gemini_key()
                         logger.warning(f"Gemini API Quota Exceeded. Rotated to new key: {new_key[:8]}... Retrying immediately (attempt {attempt+1}/{retries}).")
@@ -61,7 +61,6 @@ async def _call_gemini_with_retry(client, prompt: str, retries: int = 4) -> Any:
                 raise e
 
 
-from loguru import logger
 from playwright.async_api import BrowserContext, Page, TimeoutError as PWTimeout
 
 try:
@@ -79,7 +78,6 @@ _manual_modes: Dict[str, bool] = {}
 _pause_timestamps: Dict[str, float] = {}
 
 def get_pause_status(session_id: str) -> Dict[str, Any]:
-    import time
     is_paused = False
     if session_id in _pause_events and not _pause_events[session_id].is_set():
         is_paused = True
@@ -92,7 +90,6 @@ def get_pause_status(session_id: str) -> Dict[str, Any]:
     }
 
 def trigger_pause_external(session_id: str):
-    import time
     if session_id not in _pause_events:
         _pause_events[session_id] = asyncio.Event()
         _pause_events[session_id].set()
@@ -107,7 +104,6 @@ def trigger_resume_external(session_id: str):
             del _pause_timestamps[session_id]
 
 async def pause_checkpoint(session_id: str, emit: Any, reason: str, page: Any = None, client: Any = None):
-    import time
     if session_id not in _pause_events:
         _pause_events[session_id] = asyncio.Event()
         _pause_events[session_id].set()  # running by default
@@ -155,7 +151,7 @@ async def pause_checkpoint(session_id: str, emit: Any, reason: str, page: Any = 
     await asyncio.sleep(3)
     
     if page:
-        import time, os
+        import os
         # Take a fresh screenshot to project directory on resume
         os.makedirs("screenshots", exist_ok=True)
         screenshot_path = f"screenshots/resume_{session_id}_{int(time.time())}.png"
@@ -797,39 +793,6 @@ def _best_match(hints: List[str], field_map: Dict[str, str]) -> Optional[str]:
     return None
 
 
-# ── Layer 3 – Resume upload ───────────────────────────────────────────────────
-
-async def _upload_resume(page: Page, resume_path: str) -> int:
-    """
-    Find any file-input element and set the resume file path.
-    Returns 1 if an upload was performed, else 0.
-    """
-    selectors = [
-        "input[type='file'][id*='resume' i]",
-        "input[type='file'][name*='resume' i]",
-        "input[type='file'][aria-label*='resume' i]",
-        "input[type='file'][id*='cv' i]",
-        "input[type='file'][name*='cv' i]",
-        "input[type='file'][aria-label*='cv' i]",
-        "[aria-label*='resume' i] input[type='file']",
-        "[aria-label*='cv' i] input[type='file']",
-        "input[type='file'][accept*='pdf']",
-        "input[type='file'][accept*='.doc']",
-        "input[type='file']",
-    ]
-    for sel in selectors:
-        try:
-            el = await page.query_selector(sel)
-            if el:
-                await el.set_input_files(resume_path)
-                await human_delay(1.0, 2.0)
-                logger.info(f"Resume uploaded via selector: {sel!r}")
-                return 1
-        except Exception as exc:
-            logger.debug(f"File upload attempt failed ({sel!r}): {exc}")
-    return 0
-
-
 # ── Layer 4 – Dropdown / select handling ──────────────────────────────────────
 
 async def _fill_dropdowns(page, candidate: CandidateProfile) -> int:
@@ -1398,7 +1361,6 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
     from .config import get_current_gemini_key, get_portal_credentials
     from .browser import human_delay
     from pathlib import Path
-    import asyncio
     import json
     
     current_key = get_current_gemini_key()
@@ -1581,7 +1543,7 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
                     filled_count += await _upload_resume(page, candidate.resume_path, emit)
                     
             # Upgrade 6: Pre-submit validation
-            await _pre_submit_validation(page, candidate, client, emit)
+            await _pre_submit_validation(page, candidate, client, emit, session_id)
 
             # Upgrade 9: Form After Screenshot
             try:
@@ -1598,14 +1560,35 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
             # Auto-submit without pausing — only pause on actual errors
             if emit:
                 emit({"type": "log", "level": "info", "message": "Clicking Next/Submit..."})
+            url_before = page.url
             clicked = await click_next_or_submit(page)
             if not clicked:
                 logger.info("No 'Next' or 'Submit' button found. Form may be complete.")
                 break
-                
-            # Upgrade 7: Post-submit confirmation
-            await _post_submit_confirmation(page, emit)
-    
+
+            await human_delay(1.5, 2.5)
+
+            # Validation-aware retry: if the page didn't advance and shows field
+            # errors, re-map only what's wrong, fill it, and submit once more.
+            errors = await _collect_validation_errors(page)
+            if errors and page.url == url_before:
+                if emit:
+                    emit({"type": "log", "level": "warning",
+                          "message": f"Form rejected ({len(errors)} field error(s)) — fixing and retrying..."})
+                logger.info(f"Validation errors after submit: {errors[:5]}")
+                refields = await map_form_fields(page, candidate, client, "APPLICATION_FORM", "", "", emit, session_id)
+                if refields:
+                    filled_count += await fill_and_submit_mapped_fields(page, refields, candidate, client, emit, session_id)
+                await _handle_recaptcha_before_submit(page, emit, session_id)
+                await click_next_or_submit(page)
+                await human_delay(1.5, 2.5)
+
+            # Upgrade 7: Post-submit confirmation (returns status; never raises)
+            status = await _post_submit_confirmation(page, emit)
+            if status == "CONFIRMED":
+                logger.info("Application confirmed — finishing AI handler.")
+                break
+
     return filled_count
 
 async def ai_answer_unknown_field(field_label: str, field_type: str, candidate: CandidateProfile, api_key: str) -> str:
@@ -1626,56 +1609,90 @@ async def ai_answer_unknown_field(field_label: str, field_type: str, candidate: 
         logger.error(f"ai_answer_unknown_field failed for {field_label}: {e}")
         return ""
 
-async def fill_dropdown(page: Page, selector: str, desired_value: str):
-    """Upgrade 3: Smart dropdown handler."""
+async def fill_dropdown(page: Page, selector: str, desired_value: str, known_options: Optional[List[str]] = None) -> bool:
+    """Select *desired_value* in a dropdown (native <select>, ARIA listbox/combobox,
+    or react-select). Uses fuzzy/synonym matching against the option labels.
+    Returns True if a selection was made."""
     from .browser import human_delay
     try:
         el = await page.query_selector(selector)
-        if not el: return
+        if not el:
+            return False
         tag = await el.evaluate("e => e.tagName.toLowerCase()")
-        role = await el.evaluate("e => e.getAttribute('role') || ''")
-        
-        # Type 1: Native HTML select
-        if tag == 'select':
-            options = await el.evaluate("""e => Array.from(e.options).map(o => ({text: o.innerText, value: o.value}))""")
-            best_match = None
-            for opt in options:
-                if desired_value.lower() in opt['text'].lower():
-                    best_match = opt['text']
-                    break
-            if best_match:
-                await el.select_option(label=best_match)
-            return
+        role = (await el.evaluate("e => e.getAttribute('role') || ''")).lower()
 
-        # Type 2: Custom div-based dropdown (role=listbox or combobox, not input)
-        if tag != 'input' and ('listbox' in role.lower() or 'combobox' in role.lower()):
-            await el.click()
-            await human_delay(0.5, 0.5)
-            # Find visible options
-            options = await page.query_selector_all("li, [role='option'], .option, .item")
-            for opt in options:
-                if await opt.is_visible():
-                    text = await opt.inner_text()
-                    if text and desired_value.lower() in text.lower():
-                        await opt.click()
-                        return
-            return
+        # Type 1: Native HTML <select>
+        if tag == "select":
+            options = await el.evaluate("e => Array.from(e.options).map(o => ({text: o.innerText, value: o.value}))")
+            texts = [o["text"] for o in options if o["text"]]
+            match = _best_option_match(desired_value, texts) or (known_options and _best_option_match(desired_value, known_options))
+            if match:
+                try:
+                    await el.select_option(label=match)
+                    return True
+                except Exception:
+                    # match against value attribute as fallback
+                    for o in options:
+                        if o["text"] == match:
+                            await el.select_option(value=o["value"])
+                            return True
+            return False
 
-        # Type 3: Combobox text input
-        if tag == 'input' and 'combobox' in role.lower():
+        # Type 2: Custom div dropdown (role=listbox/combobox, not an input)
+        if tag != "input" and ("listbox" in role or "combobox" in role):
             await el.click()
-            await el.fill("") # Clear first
-            for char in desired_value:
-                await el.type(char, delay=50)
-            await human_delay(0.8, 0.8)
-            # Click first suggestion
-            options = await page.query_selector_all("li, [role='option']")
-            for opt in options:
-                if await opt.is_visible():
-                    await opt.click()
-                    return
+            await human_delay(0.4, 0.7)
+            opts = await page.query_selector_all("li[role='option'], [role='option'], li, .option, .item, [class*='option']")
+            visible = []
+            for o in opts:
+                try:
+                    if await o.is_visible():
+                        visible.append((await o.inner_text(), o))
+                except Exception:
+                    pass
+            match = _best_option_match(desired_value, [t for t, _ in visible if t])
+            for t, o in visible:
+                if t == match:
+                    await o.click()
+                    return True
+            return False
+
+        # Type 3: Combobox / react-select text input — type then pick a suggestion
+        if tag == "input":
+            await el.click()
+            try:
+                await el.fill("")
+            except Exception:
+                pass
+            await el.type(desired_value, delay=40)
+            await human_delay(0.7, 1.0)
+            opts = await page.query_selector_all("li[role='option'], [role='option'], li, [class*='option']")
+            visible = []
+            for o in opts:
+                try:
+                    if await o.is_visible():
+                        visible.append((await o.inner_text(), o))
+                except Exception:
+                    pass
+            if visible:
+                match = _best_option_match(desired_value, [t for t, _ in visible if t])
+                for t, o in visible:
+                    if t == match:
+                        await o.click()
+                        return True
+                # No fuzzy match — accept the first suggestion
+                await visible[0][1].click()
+                return True
+            # No suggestions appeared — press Enter to accept typed value
+            try:
+                await el.press("Enter")
+                return True
+            except Exception:
+                return False
+        return False
     except Exception as e:
         logger.error(f"fill_dropdown failed for {selector}: {e}")
+        return False
 
 async def _upload_resume(page: Page, resume_path: str, emit: Optional[Any] = None) -> int:
     """Upgrade 4: Dual resume upload handling."""
@@ -1730,75 +1747,78 @@ async def _upload_resume(page: Page, resume_path: str, emit: Optional[Any] = Non
         logger.debug(f"Dual upload logic failed: {exc}")
     return 0
 
-async def _pre_submit_validation(page: Page, candidate: CandidateProfile, client: Any, emit: Optional[Any]):
-    """Upgrade 6: Pre-submit required field validation."""
-    from .config import GEMINI_API_KEY
-    from .browser import human_delay
+async def _collect_validation_errors(page: Page) -> List[str]:
+    """Return visible validation-error messages on the page (empty if none)."""
+    errors: List[str] = []
     try:
-        required_elements = []
-        for frame_idx, frame in enumerate(page.frames):
+        for frame in page.frames:
             try:
-                frame_reqs = await frame.evaluate("""
-                (frameIdx) => {
-                    const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
-                    return inputs.map(i => {
-                        const isRequired = i.hasAttribute('required') || i.getAttribute('aria-required') === 'true' || 
-                                           (i.labels && i.labels.length > 0 && i.labels[0].innerText.includes('*'));
-                        const val = i.value || '';
-                        const emptyVals = ['-- No answer --', '-- Select --', '-- Please select --', ''];
-                        if (isRequired && emptyVals.includes(val)) {
-                            const aiId = i.getAttribute('data-ai-id');
-                            return {
-                                css_selector: aiId ? `[data-ai-id='${aiId}']` : (i.id ? '#' + i.id : (i.name ? '[name="' + i.name + '"]' : '')),
-                                frame_idx: frameIdx,
-                                label: (i.labels && i.labels.length > 0) ? i.labels[0].innerText : (i.getAttribute('aria-label') || ''),
-                                type: i.tagName.toLowerCase() === 'select' ? 'dropdown' : i.type
-                            };
+                msgs = await frame.evaluate(
+                    """() => {
+                        const sels = ["[aria-invalid='true']", ".error", ".error-message",
+                            ".field-error", ".invalid-feedback", "[class*='error']",
+                            "[role='alert']", ".Mui-error", ".has-error"];
+                        const out = [];
+                        for (const s of sels) {
+                            for (const el of document.querySelectorAll(s)) {
+                                if (el.offsetParent === null) continue;
+                                const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
+                                if (t && t.length < 200) out.push(t);
+                            }
                         }
-                        return null;
-                    }).filter(i => i !== null && i.css_selector !== '');
-                }
-                """, frame_idx)
-                if frame_reqs: required_elements.extend(frame_reqs)
+                        return out;
+                    }"""
+                )
+                if msgs:
+                    errors.extend(msgs)
             except Exception:
                 pass
-        
-        for req in required_elements:
-            if not req.get('label'): continue
-            ans = await ai_answer_unknown_field(req['label'], req['type'], candidate, GEMINI_API_KEY)
-            if ans:
-                frame_idx = req.get('frame_idx', 0)
-                target_frame = page.frames[frame_idx] if frame_idx < len(page.frames) else page
-                if req['type'] == 'dropdown':
-                    await fill_dropdown(target_frame, req['css_selector'], ans)
-                else:
-                    el = await target_frame.query_selector(req['css_selector'])
-                    if el: await el.fill(ans)
-                if emit: emit({"type": "log", "level": "info", "message": f"Pre-submit fix: filled {req['label']} with {ans}"})
-                await human_delay(0.5, 1.0)
+    except Exception:
+        pass
+    # De-duplicate while preserving order
+    seen, uniq = set(), []
+    for e in errors:
+        if e not in seen:
+            seen.add(e)
+            uniq.append(e)
+    return uniq
+
+
+async def _pre_submit_validation(page: Page, candidate: CandidateProfile, client: Any, emit: Optional[Any], session_id: str = "default") -> int:
+    """Pre-submit sweep: re-map the form with the robust engine to fill any
+    required/empty fields (including radios, checkboxes and custom dropdowns)
+    that the first pass missed or that appeared after earlier fills."""
+    try:
+        fields = await map_form_fields(page, candidate, client, "APPLICATION_FORM", "", "", emit, session_id)
+        if not fields:
+            return 0
+        n = await fill_and_submit_mapped_fields(page, fields, candidate, client, emit, session_id)
+        if n and emit:
+            emit({"type": "log", "level": "info", "message": f"Pre-submit pass filled {n} remaining field(s)."})
+        return n
     except Exception as e:
         logger.error(f"Pre-submit validation failed: {e}")
+        return 0
 
 async def _handle_recaptcha_before_submit(page: Page, emit: Optional[Any], session_id: str = "default"):
     """Upgrade 5: reCAPTCHA detection and handling."""
-    import asyncio
     try:
         recaptcha_iframe = await page.query_selector('iframe[src*="recaptcha"], div.g-recaptcha, div[data-sitekey]')
         is_robot_text = await page.evaluate("() => document.body.innerText.includes('I am not a robot')")
-        
+
         if recaptcha_iframe or is_robot_text:
             if recaptcha_iframe:
                 box = await recaptcha_iframe.bounding_box()
                 if box:
                     await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
                     await asyncio.sleep(3)
-                    
+
             # Check success
             checked = await page.query_selector("div.recaptcha-checkbox-checked")
             if checked:
                 if emit: emit({"type": "log", "level": "info", "message": "reCAPTCHA checkbox clicked successfully"})
                 return
-                
+
             # Check for visual challenge
             challenge = await page.query_selector('iframe[title*="challenge"], iframe[src*="bframe"]')
             if challenge:
@@ -1806,46 +1826,48 @@ async def _handle_recaptcha_before_submit(page: Page, emit: Optional[Any], sessi
     except Exception as e:
         logger.error(f"reCAPTCHA handling error: {e}")
 
-async def _post_submit_confirmation(page: Page, emit: Optional[Any]):
-    """Upgrade 7: Post-submit confirmation detection."""
-    from .models import JobStatus
-    import asyncio
+async def _post_submit_confirmation(page: Page, emit: Optional[Any]) -> str:
+    """Detect whether the application was submitted. Returns 'CONFIRMED' or
+    'SUBMITTED_UNCONFIRMED'. Never raises — multi-step forms must keep going."""
     try:
         success_indicators = ["confirmation", "thank-you", "thank_you", "success", "submitted", "complete", "apply-complete"]
         success_phrases = ["application submitted", "thank you for applying", "we have received your application", "application complete", "you have successfully applied", "your application has been received"]
-        
+
         found_success = False
-        for _ in range(7):
+        for _ in range(5):
             await asyncio.sleep(2)
             url = page.url.lower()
             if any(ind in url for ind in success_indicators):
                 found_success = True
                 break
-            
-            body = await page.inner_text('body')
-            body_lower = body.lower()
+
+            try:
+                body_lower = (await page.inner_text('body')).lower()
+            except Exception:
+                body_lower = ""
             if any(phrase in body_lower for phrase in success_phrases):
                 found_success = True
                 break
-                
-            dialog = await page.query_selector('[role="dialog"]')
-            if dialog:
-                found_success = True
-                break
-                
+
         if found_success:
             if emit: emit({"type": "log", "level": "info", "message": "Application submitted successfully — confirmation detected"})
-            # To mark as APPLIED, we don't return JobStatus directly here, orchestrator sets it based on filled_count.
-        else:
+            return "CONFIRMED"
+
+        # No explicit confirmation — capture a screenshot for review and let the
+        # caller decide whether to continue (multi-step) or finish.
+        try:
             from .diagnostics import DIAGNOSTICS_DIR
             await page.screenshot(path=str(DIAGNOSTICS_DIR / "submit_result.png"), full_page=True)
-            if emit: emit({"type": "log", "level": "warning", "message": "Submit clicked but no confirmation detected — screenshot saved for manual review"})
-            # The orchestrator is listening, but we can't easily force MANUAL_REVIEW from here unless we raise an exception or modify the return tuple. We will rely on orchestrator observing filled>0 as APPLIED for now, or if it catches MANUAL_REVIEW if we raise a specific error. The user said "mark job status as MANUAL_REVIEW rather than FAILED". We'll just return a special count or rely on the orchestrator to check state. Let's just raise an Exception so orchestrator can catch it, wait no, they said "mark job status as MANUAL_REVIEW". We will raise an exception: `raise Exception("MANUAL_REVIEW: No confirmation detected")`
-            raise Exception("MANUAL_REVIEW: Submit clicked but no confirmation detected")
+        except Exception:
+            pass
+        if emit:
+            emit({"type": "log", "level": "info",
+                  "message": "Submit clicked — no confirmation text yet (continuing / flagged for review)."})
+        return "SUBMITTED_UNCONFIRMED"
     except Exception as e:
-        if "MANUAL_REVIEW" in str(e):
-            raise
         logger.error(f"Post-submit check error: {e}")
+        return "SUBMITTED_UNCONFIRMED"
+
 
 async def _heuristic_classify_page(page: Page) -> Tuple[str, str]:
     """Classify the page using DOM inspection only — no AI required.
@@ -2014,246 +2036,585 @@ async def classify_portal_page(page: Page, client: Any) -> Tuple[str, str]:
         return "UNKNOWN", str(e)
 
 
-async def map_form_fields(page: Page, candidate: CandidateProfile, client: Any, page_type: str, email: str, password: str, emit: Optional[Any] = None, session_id: str = "default") -> List[Dict]:
-    import json
-    from .config import GEMINI_API_KEY
+# ── Field-matching helpers (used by the AI form engine) ───────────────────────
+
+def _norm(s: Any) -> str:
+    """Lower-case, strip punctuation, collapse whitespace — for fuzzy matching."""
+    if not s:
+        return ""
+    s = str(s).lower()
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# Common equivalences so AI answers like "United States" match an option "USA".
+_OPTION_SYNONYMS: List[List[str]] = [
+    ["yes", "y", "true", "agree", "i agree", "i certify", "accept"],
+    ["no", "n", "false", "disagree"],
+    ["united states", "usa", "us", "u s", "u s a", "united states of america", "america"],
+    ["united kingdom", "uk", "u k", "great britain"],
+    ["male", "m"],
+    ["female", "f"],
+    ["prefer not to say", "decline to self identify", "i don t wish to answer",
+     "i do not wish to answer", "decline to answer", "prefer not to answer"],
+    ["i am not a veteran", "not a veteran", "not a protected veteran"],
+    ["i do not have a disability", "no disability", "not disabled"],
+]
+
+
+def _synonyms_for(value_norm: str) -> set:
+    out = {value_norm}
+    for group in _OPTION_SYNONYMS:
+        if value_norm in group:
+            out.update(group)
+    return out
+
+
+def _best_option_match(value: str, options: List[str]) -> Optional[str]:
+    """Return the option string that best matches *value*, or None.
+
+    Tries, in order: exact, case/punctuation-insensitive, synonym groups,
+    substring either-way, then token overlap.
+    """
+    if not options:
+        return None
+    vnorm = _norm(value)
+    if not vnorm:
+        return None
+    opt_norm = [(_norm(o), o) for o in options]
+
+    # 1. exact normalized
+    for n, o in opt_norm:
+        if n == vnorm:
+            return o
+    # 2. synonyms
+    vsyn = _synonyms_for(vnorm)
+    for n, o in opt_norm:
+        if n in vsyn or _synonyms_for(n) & vsyn:
+            return o
+    # 3. substring either direction (prefer longest option)
+    subs = [o for n, o in opt_norm if n and (n in vnorm or vnorm in n)]
+    if subs:
+        return max(subs, key=len)
+    # 4. token overlap
+    vtokens = set(vnorm.split())
+    best, best_score = None, 0
+    for n, o in opt_norm:
+        score = len(vtokens & set(n.split()))
+        if score > best_score:
+            best, best_score = o, score
+    return best
+
+
+def _humanize(name: str) -> str:
+    """Turn a field name/id like 'work_auth.usCitizen' into 'work auth us citizen'."""
+    s = re.sub(r"[._\-\[\]]+", " ", str(name or ""))
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+_TRUTHY = {"yes", "y", "true", "1", "agree", "i agree", "checked", "check", "on",
+           "i certify", "accept", "confirmed"}
+
+
+async def _fill_text(frame: Any, selector: str, value: str) -> bool:
+    """Fill a text/textarea input robustly, dispatching React/Ant events."""
+    el = await frame.query_selector(selector)
+    if not el or not await el.is_visible():
+        return False
     try:
-        all_elements = []
+        await el.fill(value)
+    except Exception:
+        try:
+            await el.click()
+            await el.fill("")
+            await el.type(value, delay=20)
+        except Exception:
+            return False
+    # Make framework-controlled inputs register the change.
+    try:
+        await el.evaluate(
+            """el => {
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+                    || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+                if (setter) setter.call(el, el.value);
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                el.dispatchEvent(new FocusEvent('blur', {bubbles: true}));
+            }"""
+        )
+    except Exception:
+        pass
+    return True
+
+
+async def _select_radio_option(frame: Any, options: List[Dict], value: str) -> bool:
+    """Click the radio option in a group whose label/value best matches *value*."""
+    if not options:
+        return False
+    labels = [o.get("label") or o.get("value") or "" for o in options]
+    match = _best_option_match(value, labels)
+    chosen = None
+    if match is not None:
+        for o in options:
+            if (o.get("label") or o.get("value") or "") == match:
+                chosen = o
+                break
+    if chosen is None:
+        # Also try matching against option *values* directly.
+        vmatch = _best_option_match(value, [o.get("value", "") for o in options])
+        for o in options:
+            if o.get("value", "") == vmatch:
+                chosen = o
+                break
+    if chosen is None:
+        return False
+    sel = f"[data-ai-id='{chosen['ai_id']}']" if chosen.get("ai_id") else chosen.get("css_selector")
+    try:
+        el = await frame.query_selector(sel)
+        if not el:
+            return False
+        try:
+            await el.check()
+        except Exception:
+            await el.click()
+        return True
+    except Exception:
+        return False
+
+
+async def _apply_checkbox(frame: Any, field: Dict, value: str) -> bool:
+    """Check/uncheck a checkbox based on *value* (truthy → checked)."""
+    sel = f"[data-ai-id='{field['ai_id']}']" if field.get("ai_id") else field.get("css_selector")
+    if not sel:
+        return False
+    want = _norm(value) in _TRUTHY or "agree" in _norm(value) or "certif" in _norm(value)
+    # Consent/agreement checkboxes default to checked when value is unclear.
+    label_n = _norm(field.get("label", ""))
+    if any(k in label_n for k in ("agree", "consent", "terms", "privacy", "certify", "acknowledge")):
+        want = True
+    try:
+        el = await frame.query_selector(sel)
+        if not el or not await el.is_visible():
+            return False
+        if want:
+            await el.check()
+        else:
+            await el.uncheck()
+        return True
+    except Exception:
+        return False
+
+
+# ── Page DOM extractor (runs in the browser) ──────────────────────────────────
+
+_FIELD_EXTRACTOR_JS = """
+(frameIdx) => {
+    let counter = 1;
+    const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+
+    function labelFor(el) {
+        const lb = el.getAttribute('aria-labelledby');
+        if (lb) {
+            const t = lb.split(/\\s+/).map(id => {
+                const e = document.getElementById(id);
+                return e ? e.innerText : '';
+            }).join(' ');
+            if (norm(t)) return norm(t);
+        }
+        if (el.getAttribute('aria-label')) return norm(el.getAttribute('aria-label'));
+        if (el.id) {
+            try {
+                const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                if (l && norm(l.innerText)) return norm(l.innerText);
+            } catch (e) {}
+        }
+        if (el.labels && el.labels.length) {
+            const t = Array.from(el.labels).map(l => l.innerText).join(' ');
+            if (norm(t)) return norm(t);
+        }
+        const wrap = el.closest('label');
+        if (wrap && norm(wrap.innerText)) return norm(wrap.innerText);
+        const prev = el.previousElementSibling;
+        if (prev && norm(prev.innerText)) return norm(prev.innerText);
+        if (el.parentElement && norm(el.parentElement.innerText)) return norm(el.parentElement.innerText);
+        return '';
+    }
+
+    function groupLabelFor(el) {
+        const fs = el.closest('fieldset');
+        if (fs) {
+            const lg = fs.querySelector('legend');
+            if (lg && norm(lg.innerText)) return norm(lg.innerText);
+        }
+        const grp = el.closest('[role="radiogroup"],[role="group"]');
+        if (grp) {
+            const lb = grp.getAttribute('aria-labelledby');
+            if (lb) {
+                const e = document.getElementById(lb.split(/\\s+/)[0]);
+                if (e && norm(e.innerText)) return norm(e.innerText);
+            }
+            if (grp.getAttribute('aria-label')) return norm(grp.getAttribute('aria-label'));
+        }
+        return '';
+    }
+
+    function visible(el) {
+        if ((el.type || '').toLowerCase() === 'file') return true;
+        if (el.tagName.toLowerCase() === 'select') return true;
+        return el.offsetParent !== null || (el.getClientRects && el.getClientRects().length > 0);
+    }
+
+    const out = [];
+    const inputs = Array.from(document.querySelectorAll('input, select, textarea, [role="combobox"], [role="listbox"]'));
+    for (const i of inputs) {
+        const type = (i.type || i.tagName).toLowerCase();
+        if (['hidden', 'submit', 'button', 'reset', 'image'].includes(type)) continue;
+
+        const aiId = 'ai_' + frameIdx + '_' + (counter++);
+        i.setAttribute('data-ai-id', aiId);
+
+        let css = '';
+        if (i.id) { try { css = '#' + CSS.escape(i.id); } catch (e) {} }
+        if (!css && i.name) { try { css = i.tagName.toLowerCase() + '[name="' + CSS.escape(i.name) + '"]'; } catch (e) {} }
+
+        const lbl = labelFor(i);
+        const grp = groupLabelFor(i);
+
+        let isFilled;
+        if (type === 'radio' || type === 'checkbox') isFilled = i.checked;
+        else isFilled = !!(i.value && i.value.trim() !== '');
+
+        let options = [];
+        if (i.tagName.toLowerCase() === 'select') {
+            options = Array.from(i.options).map(o => norm(o.innerText))
+                .filter(t => t && !t.startsWith('--') && t.toLowerCase() !== 'select' && !/please select|select one|choose/i.test(t));
+        }
+
+        const required = i.hasAttribute('required') || i.getAttribute('aria-required') === 'true'
+            || (lbl && lbl.includes('*')) || (grp && grp.includes('*'));
+
+        out.push({
+            ai_id: aiId,
+            css_selector: css,
+            frame_idx: frameIdx,
+            tag: i.tagName.toLowerCase(),
+            type: type,
+            role: (i.getAttribute('role') || '').toLowerCase(),
+            id: i.id || '',
+            name: i.name || '',
+            placeholder: i.placeholder || '',
+            ariaLabel: i.getAttribute('aria-label') || '',
+            label: (lbl || '').substring(0, 200),
+            group_label: (grp || '').substring(0, 200),
+            option_label: (type === 'radio' || type === 'checkbox') ? (lbl || '').substring(0, 120) : '',
+            option_value: (type === 'radio' || type === 'checkbox') ? (i.value || '') : '',
+            required: !!required,
+            isFilled: isFilled,
+            options: options
+        });
+    }
+    return out.filter(i => visible(i) || i.tag === 'select' || i.type === 'file');
+}
+"""
+
+
+def _resolve_known_value(field: Dict, candidate: CandidateProfile, page_type: str,
+                         email: str, password: str) -> Tuple[Optional[str], Optional[str]]:
+    """Deterministic (no-AI) value for a logical field. Returns (value, source) or (None, None)."""
+    from .config import SAFE_DEFAULTS
+    search_text = " ".join(_norm(field.get(k, "")) for k in ("label", "group_label", "placeholder", "name", "ariaLabel"))
+
+    # 1. Login / register override
+    if page_type in ("LOGIN_PAGE", "REGISTER_PAGE", "LOGIN_OR_REGISTER"):
+        if "email" in search_text or "username" in search_text:
+            return email, "PROFILE"
+        if "password" in search_text:
+            return password, "PROFILE"
+
+    name = candidate.name or ""
+    parts = name.split(" ")
+    loc_parts = [p.strip() for p in (candidate.location or "").split(",") if p.strip()]
+
+    if "first name" in search_text and name:
+        return parts[0], "INFERRED"
+    if ("last name" in search_text or "surname" in search_text or "family name" in search_text) and name:
+        return (" ".join(parts[1:]) if len(parts) > 1 else parts[0]), "INFERRED"
+    if "full name" in search_text and name:
+        return name, "PROFILE"
+    if "name" in search_text and name and "company" not in search_text and "user" not in search_text:
+        return name, "PROFILE"
+    if "email" in search_text and candidate.email:
+        return candidate.email, "PROFILE"
+    if ("phone" in search_text or "mobile" in search_text or "telephone" in search_text) and candidate.phone:
+        return candidate.phone, "PROFILE"
+    if "country" in search_text and loc_parts:
+        return loc_parts[-1], "INFERRED"
+    if "city" in search_text and loc_parts:
+        return loc_parts[0], "INFERRED"
+    if ("state" in search_text or "province" in search_text) and loc_parts:
+        if len(loc_parts) > 2:
+            return loc_parts[1], "INFERRED"
+        if len(loc_parts) == 2:
+            return loc_parts[0], "INFERRED"
+    if "years of experience" in search_text and candidate.years_of_experience:
+        return candidate.years_of_experience, "PROFILE"
+    if "linkedin" in search_text and candidate.linkedin_url:
+        return candidate.linkedin_url, "PROFILE"
+    if ("website" in search_text or "portfolio" in search_text) and candidate.linkedin_url:
+        return candidate.linkedin_url, "INFERRED"
+
+    # SAFE_DEFAULTS (work auth, sponsorship, demographics, etc.)
+    for keyword, default_val in SAFE_DEFAULTS.items():
+        if keyword in search_text:
+            if keyword == "salary":
+                if candidate.salary_expectation:
+                    return candidate.salary_expectation, "PROFILE"
+                return None, None  # leave to AI / blank
+            return default_val, "DEFAULT"
+
+    return None, None
+
+
+async def map_form_fields(page: Page, candidate: CandidateProfile, client: Any, page_type: str, email: str, password: str, emit: Optional[Any] = None, session_id: str = "default") -> List[Dict]:
+    """Scan every frame, build a list of *logical* fields, resolve each value via
+    deterministic rules first, then resolve all remaining unknowns in ONE batched
+    Gemini call. Returns a list of fill instructions for fill_and_submit_mapped_fields."""
+    import json
+
+    profile_json = candidate.model_dump_json(exclude={"resume_path"})
+
+    try:
+        all_elements: List[Dict] = []
         for frame_idx, frame in enumerate(page.frames):
             try:
-                elements = await frame.evaluate("""
-                (frameIdx) => {
-                    let counter = 1;
-                    const inputs = Array.from(document.querySelectorAll('input, select, textarea, [role="combobox"], [role="listbox"]'));
-                    return inputs.map(i => {
-                        const aiId = 'ai_' + frameIdx + '_' + counter++;
-                        i.setAttribute('data-ai-id', aiId);
-                        
-                        let labelText = '';
-                        if (i.labels && i.labels.length > 0) {
-                            labelText = i.labels[0].innerText;
-                        } else {
-                            const prev = i.previousElementSibling;
-                            if (prev && prev.innerText) labelText = prev.innerText;
-                            else if (i.parentElement && i.parentElement.innerText) {
-                                labelText = i.parentElement.innerText.replace(i.innerText || '', '').trim();
-                            }
-                        }
-                        
-                        let cssSelector = '';
-                        if (i.id) {
-                            try { cssSelector = '#' + CSS.escape(i.id); } catch(e) {}
-                        }
-                        if (!cssSelector && i.name) {
-                            try { cssSelector = i.tagName.toLowerCase() + '[name="' + CSS.escape(i.name) + '"]'; } catch(e) {}
-                        }
-                        
-                        let isFilled = false;
-                        if (i.type === 'radio' || i.type === 'checkbox') {
-                            const n = i.name;
-                            if (n) {
-                                isFilled = !!document.querySelector(`input[name="${n}"]:checked`);
-                            } else {
-                                isFilled = i.checked;
-                            }
-                        } else {
-                            isFilled = !!i.value && i.value.trim() !== '';
-                        }
-                        
-                        return {
-                            ai_id: aiId,
-                            css_selector: cssSelector,
-                            frame_idx: frameIdx,
-                            tag: i.tagName.toLowerCase(),
-                            type: i.type || '',
-                            id: i.id || '',
-                            name: i.name || '',
-                            placeholder: i.placeholder || '',
-                            ariaLabel: i.getAttribute('aria-label') || '',
-                            label: labelText.substring(0, 150),
-                            isFilled: isFilled
-                        };
-                    }).filter(i => i.type !== 'hidden' && i.type !== 'submit' && !i.isFilled);
-                }
-                """, frame_idx)
-                
+                elements = await frame.evaluate(_FIELD_EXTRACTOR_JS, frame_idx)
                 if elements:
                     all_elements.extend(elements)
             except Exception as e:
                 logger.debug(f"Could not read frame {frame_idx}: {e}")
-        
+
         if not all_elements:
             return []
-            
-        from .config import SAFE_DEFAULTS
-        
-        results = []
+
+        # ── Build logical fields (group radios by name) ───────────────────────
+        logical: List[Dict] = []
+        radio_groups: Dict[Tuple[int, str], List[Dict]] = {}
         for el in all_elements:
-            ai_id = el['ai_id']
-            label_lower = el['label'].lower()
-            field_type = el['type']
-            tag = el['tag']
-            css_selector = el.get('css_selector', '')
-            frame_idx = el['frame_idx']
-            name_attr = el['name'].lower()
-            
-            # Combine label, placeholder, name, ariaLabel for keyword matching
-            search_text = f"{label_lower} {el['placeholder'].lower()} {name_attr} {el['ariaLabel'].lower()}"
-            
-            value_to_fill = None
-            source = None
-            
-            # 1. Login/Register override
-            if page_type in ("LOGIN_PAGE", "REGISTER_PAGE", "LOGIN_OR_REGISTER"):
-                if "email" in search_text:
-                    value_to_fill, source = email, "PROFILE"
-                elif "password" in search_text:
-                    value_to_fill, source = password, "PROFILE"
-            
-            # 2. Direct Profile matches & Inference (Fix 1)
-            if not value_to_fill:
-                if "first name" in search_text and candidate.name:
-                    value_to_fill, source = candidate.name.split(" ")[0], "INFERRED"
-                elif "last name" in search_text and candidate.name:
-                    parts = candidate.name.split(" ")
-                    value_to_fill, source = " ".join(parts[1:]) if len(parts) > 1 else parts[0], "INFERRED"
-                elif "name" in search_text and candidate.name and not ("company" in search_text):
-                    value_to_fill, source = candidate.name, "PROFILE"
-                elif "email" in search_text and candidate.email:
-                    value_to_fill, source = candidate.email, "PROFILE"
-                elif "phone" in search_text and candidate.phone:
-                    value_to_fill, source = candidate.phone, "PROFILE"
-                elif "country" in search_text and candidate.location:
-                    parts = candidate.location.split(",")
-                    value_to_fill, source = parts[-1].strip() if len(parts) > 1 else parts[0].strip(), "INFERRED"
-                elif "city" in search_text and candidate.location:
-                    value_to_fill, source = candidate.location.split(",")[0].strip(), "INFERRED"
-                elif ("state" in search_text or "province" in search_text) and candidate.location:
-                    parts = candidate.location.split(",")
-                    if len(parts) > 2:
-                        value_to_fill, source = parts[1].strip(), "INFERRED"
-                    elif len(parts) == 2:
-                        value_to_fill, source = parts[0].strip(), "INFERRED"
-                elif ("zip" in search_text or "postal" in search_text):
-                    pass # Only use if stored
-                elif "years of experience" in search_text:
-                    if candidate.years_of_experience:
-                        value_to_fill, source = candidate.years_of_experience, "PROFILE"
-                elif "linkedin" in search_text and candidate.linkedin_url:
-                    value_to_fill, source = candidate.linkedin_url, "PROFILE"
-                elif ("website" in search_text or "portfolio" in search_text) and candidate.linkedin_url:
-                    value_to_fill, source = candidate.linkedin_url, "INFERRED"
-            
-            # 3. Safe Defaults lookup (Fix 2)
-            if not value_to_fill:
-                for keyword, default_val in SAFE_DEFAULTS.items():
-                    if keyword in search_text:
-                        if keyword == "salary":
-                            value_to_fill = candidate.salary_expectation or ""
-                            source = "PROFILE" if candidate.salary_expectation else "DEFAULT"
-                        else:
-                            value_to_fill, source = default_val, "DEFAULT"
-                        break
-            
-            # 4. Textarea special handling (Fix 4)
-            if not value_to_fill and (tag == 'textarea' or (tag == 'input' and field_type == 'text')): # We don't have visible char limit easily, use textarea
-                pass # Handled by Gemini
-                
-            # 5. Dropdown extraction (Fix 5 preparation)
-            available_options = []
-            if tag == 'select':
-                try:
-                    target_frame = page.frames[frame_idx] if frame_idx < len(page.frames) else page
-                    el_handle = await target_frame.query_selector(css_selector)
-                    if el_handle:
-                        options = await el_handle.evaluate("""e => Array.from(e.options).map(o => o.innerText)""")
-                        available_options = [opt for opt in options if opt and '--' not in opt and 'select' not in opt.lower()]
-                except Exception:
-                    pass
-            
-            # 6. Gemini fallback (Fix 3 & Fix 4)
-            if not value_to_fill:
-                # Textarea/Long answer prompt (Fix 4)
-                if tag == 'textarea':
-                    job_title = await page.title() # fallback
-                    try:
-                        job_title_el = await page.query_selector("h1, h2")
-                        if job_title_el:
-                            job_title = await job_title_el.inner_text()
-                    except: pass
-                    
-                    prompt = f"Write a professional 2 to 3 sentence answer for a job application field. Field: {el['label']}. Job title from the page: {job_title}. Candidate profile: {candidate.model_dump_json(exclude={{'resume_path'}})}. Keep it concise, professional, and specific to the candidate's background."
-                else:
-                    # Standard prompt (Fix 3)
-                    prompt = f"You are filling a job application form for a candidate. Field label: {el['label']}. Field type: {field_type}. Available options if any: {available_options}. Candidate profile: {candidate.model_dump_json(exclude={{'resume_path'}})}. Return only the exact value to fill in this field. If it is a dropdown, return exactly one of the available options verbatim. If you are not sure, return the safest answer that would not disqualify the candidate. Never return empty string."
+            if el["type"] == "radio" and el["name"]:
+                radio_groups.setdefault((el["frame_idx"], el["name"]), []).append(el)
+        grouped_ids = {o["ai_id"] for opts in radio_groups.values() for o in opts}
 
-                try:
-                    resp = await _call_gemini_with_retry(client, prompt)
-                    value_to_fill = resp.text.strip()
-                    source = "GEMINI"
-                except Exception as e:
-                    logger.debug(f"Gemini fallback failed for {el['label']}: {e}")
-                    value_to_fill = ""
-                    source = "ERROR"
-                    await pause_checkpoint(session_id, emit, f"Gemini API error while guessing field '{el['label']}' — please fill manually, then resume.", page=page)
+        for (fidx, gname), opts in radio_groups.items():
+            label = next((o["group_label"] for o in opts if o["group_label"]), "") or _humanize(gname)
+            logical.append({
+                "kind": "radio_group",
+                "frame_idx": fidx,
+                "name": gname,
+                "label": label,
+                "group_label": label,
+                "placeholder": "",
+                "ariaLabel": "",
+                "required": any(o["required"] for o in opts),
+                "isFilled": any(o["isFilled"] for o in opts),
+                "options": [
+                    {"label": o["option_label"] or o["option_value"], "value": o["option_value"],
+                     "ai_id": o["ai_id"], "css_selector": o["css_selector"]}
+                    for o in opts
+                ],
+            })
 
-            if value_to_fill:
-                results.append({
-                    'ai_id': ai_id,
-                    'css_selector': css_selector,
-                    'frame_idx': frame_idx,
-                    'value_to_fill': value_to_fill,
-                    'label': el['label'],
-                    'source': source,
-                    'available_options': available_options
-                })
+        for el in all_elements:
+            if el["ai_id"] in grouped_ids:
+                continue
+            tag = el["tag"]
+            etype = el["type"]
+            role = el.get("role", "")
+            if etype == "checkbox":
+                kind = "checkbox"
+            elif tag == "select" or "combobox" in role or "listbox" in role:
+                kind = "select"
+            elif tag == "textarea":
+                kind = "textarea"
+            else:
+                kind = "input"
+            logical.append({
+                "kind": kind,
+                "ai_id": el["ai_id"],
+                "css_selector": el["css_selector"],
+                "frame_idx": el["frame_idx"],
+                "tag": tag,
+                "type": etype,
+                "name": el["name"],
+                "label": el["label"],
+                "group_label": el["group_label"],
+                "placeholder": el["placeholder"],
+                "ariaLabel": el["ariaLabel"],
+                "required": el["required"],
+                "isFilled": el["isFilled"],
+                "options": el.get("options", []),
+            })
 
+        # ── Resolve deterministic values; collect unknowns for one AI call ────
+        results: List[Dict] = []
+        unknown: List[Dict] = []
+        for f in logical:
+            if f.get("isFilled") and f["kind"] != "checkbox":
+                continue
+            value, source = _resolve_known_value(f, candidate, page_type, email, password)
+            if value:
+                results.append(_make_fill(f, value, source))
+            else:
+                unknown.append(f)
+
+        # ── Batched Gemini resolution for everything still unknown ────────────
+        if unknown:
+            answers = await _batch_ai_answers(unknown, profile_json, client, page, emit, session_id)
+            for f in unknown:
+                val = answers.get(f.get("ai_id") or f.get("name") or "")
+                if val:
+                    results.append(_make_fill(f, val, "GEMINI"))
+
+        gemini_n = sum(1 for r in results if r["source"] == "GEMINI")
+        logger.info(f"Mapped {len(results)} field(s) ({gemini_n} via AI, {len(logical)} detected).")
+        if emit and gemini_n:
+            emit({"type": "log", "level": "info", "message": f"AI filled {gemini_n} field(s) in one batch."})
         return results
 
     except Exception as e:
         logger.error(f"Mapping error: {e}")
         return []
 
+
+def _make_fill(field: Dict, value: str, source: str) -> Dict:
+    return {
+        "kind": field["kind"],
+        "ai_id": field.get("ai_id"),
+        "css_selector": field.get("css_selector"),
+        "frame_idx": field.get("frame_idx", 0),
+        "value_to_fill": value,
+        "label": field.get("label") or field.get("name", ""),
+        "source": source,
+        "options": field.get("options", []),
+    }
+
+
+async def _batch_ai_answers(unknown: List[Dict], profile_json: str, client: Any,
+                            page: Page, emit: Optional[Any], session_id: str) -> Dict[str, str]:
+    """Ask Gemini for ALL unknown field values in one structured call.
+
+    Returns {ai_id_or_name: value}. Falls back to per-field calls if the batch
+    response can't be parsed. Never raises."""
+    import json
+
+    job_title = ""
+    try:
+        el = await page.query_selector("h1, h2")
+        if el:
+            job_title = (await el.inner_text())[:120]
+    except Exception:
+        pass
+
+    spec = []
+    for f in unknown:
+        key = f.get("ai_id") or f.get("name") or f.get("label")
+        entry = {
+            "id": key,
+            "question": f.get("label") or f.get("group_label") or _humanize(f.get("name", "")),
+            "type": f["kind"],
+        }
+        if f.get("kind") == "radio_group":
+            entry["options"] = [o["label"] for o in f.get("options", []) if o.get("label")]
+        elif f.get("options"):
+            entry["options"] = f["options"]
+        spec.append(entry)
+
+    prompt = (
+        "You are auto-filling a job application form for a candidate. Use the candidate "
+        "profile JSON to answer every field below. Return ONLY a JSON object mapping each "
+        "field \"id\" to the best answer string — no markdown, no commentary.\n"
+        "Rules: pick the safest answer that will NOT disqualify the candidate. For "
+        "'radio_group' or 'select' fields, return EXACTLY one of the provided options "
+        "verbatim. For 'textarea', write a concise 2-3 sentence professional answer "
+        "specific to the candidate. For yes/no questions not covered by the profile, "
+        "prefer the answer that keeps the candidate eligible. Never return an empty string.\n"
+        f"Job title on page: {job_title}\n"
+        f"Candidate profile JSON: {profile_json}\n"
+        f"Fields (JSON array): {json.dumps(spec, ensure_ascii=False)}"
+    )
+
+    try:
+        resp = await _call_gemini_with_retry(client, prompt)
+        text = (resp.text or "").strip()
+        start, end = text.find("{"), text.rfind("}") + 1
+        data = json.loads(text[start:end])
+        if isinstance(data, dict) and data:
+            return {str(k): str(v) for k, v in data.items() if v not in (None, "")}
+    except Exception as e:
+        logger.warning(f"Batch AI answer failed ({e}); falling back to per-field.")
+
+    # ── Fallback: per-field (now bug-free) ────────────────────────────────────
+    out: Dict[str, str] = {}
+    for f in unknown:
+        key = f.get("ai_id") or f.get("name") or f.get("label")
+        question = f.get("label") or f.get("group_label") or _humanize(f.get("name", ""))
+        opts = entry_opts = ([o["label"] for o in f.get("options", []) if o.get("label")]
+                             if f.get("kind") == "radio_group" else f.get("options", []))
+        if f.get("kind") == "textarea":
+            p = (f"Write a concise 2-3 sentence professional answer for the job application "
+                 f"field '{question}'. Candidate profile JSON: {profile_json}.")
+        else:
+            p = (f"Job application field: '{question}'. Available options: {opts}. "
+                 f"Candidate profile JSON: {profile_json}. Return ONLY the value to fill "
+                 f"(for a dropdown/radio return exactly one option verbatim). Pick the "
+                 f"safest non-disqualifying answer. Never return empty.")
+        try:
+            r = await _call_gemini_with_retry(client, p)
+            v = (r.text or "").strip()
+            if v:
+                out[str(key)] = v
+        except Exception as e:
+            logger.debug(f"Per-field AI failed for '{question}': {e}")
+    return out
+
 async def fill_and_submit_mapped_fields(page: Page, fields: List[Dict], candidate: CandidateProfile, client: Any, emit: Optional[Any] = None, session_id: str = "default") -> int:
     from .browser import human_delay
     filled = 0
     for field in fields:
         await check_pause_state(session_id)
-        ai_id = field.get('ai_id')
-        sel = f"[data-ai-id='{ai_id}']" if ai_id else field.get('css_selector')
-        val = field.get('value_to_fill')
-        source = field.get('source', 'default_value')
-        label = field.get('label', sel)
-        frame_idx = field.get('frame_idx', 0)
-        
-        if not sel or not val:
+        kind = field.get("kind", "input")
+        val = field.get("value_to_fill")
+        label = field.get("label", "")
+        frame_idx = field.get("frame_idx", 0)
+        source = field.get("source", "default")
+
+        if val is None and kind != "checkbox":
             continue
-            
+
+        target_frame = page.frames[frame_idx] if frame_idx < len(page.frames) else page
+        ok = False
         try:
-            target_frame = page.frames[frame_idx] if frame_idx < len(page.frames) else page
-            el = await target_frame.query_selector(sel)
-            
-            if not el and field.get('css_selector'):
-                try:
-                    el = await target_frame.query_selector(field.get('css_selector'))
-                except Exception:
-                    pass
-            
-            if el and await el.is_visible():
-                tag = await el.evaluate("e => e.tagName.toLowerCase()")
-                role = await el.evaluate("e => e.getAttribute('role') || ''")
-                
-                if tag == 'select' or 'listbox' in role.lower() or 'combobox' in role.lower():
-                    await fill_dropdown(target_frame, sel, str(val))
-                else:
-                    await el.fill(str(val))
-                await human_delay(0.2, 0.5)
-                filled += 1
-                
-                if emit: emit({"type": "log", "level": "info", "message": f"Field filled: {label} = {val} (source: {source})"})
+            if kind == "radio_group":
+                ok = await _select_radio_option(target_frame, field.get("options", []), str(val))
+            elif kind == "checkbox":
+                ok = await _apply_checkbox(target_frame, field, str(val) if val is not None else "")
+            elif kind == "select":
+                sel = f"[data-ai-id='{field['ai_id']}']" if field.get("ai_id") else field.get("css_selector")
+                ok = await fill_dropdown(target_frame, sel, str(val), field.get("options"))
+            else:  # input / textarea
+                sel = f"[data-ai-id='{field['ai_id']}']" if field.get("ai_id") else field.get("css_selector")
+                ok = await _fill_text(target_frame, sel, str(val))
+                if not ok and field.get("css_selector"):
+                    ok = await _fill_text(target_frame, field["css_selector"], str(val))
         except Exception as e:
-            logger.debug(f"Failed to fill {sel} in frame {frame_idx}: {e}")
-            
+            logger.debug(f"Failed to fill '{label}' ({kind}) in frame {frame_idx}: {e}")
+
+        if ok:
+            filled += 1
+            await human_delay(0.2, 0.5)
+            if emit:
+                emit({"type": "log", "level": "info", "message": f"Field filled: {label} = {val} (source: {source})"})
+
     return filled
 
 async def click_next_or_submit(page: Page) -> bool:
