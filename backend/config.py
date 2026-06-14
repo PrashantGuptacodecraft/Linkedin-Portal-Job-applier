@@ -36,7 +36,11 @@ LINKEDIN_PASSWORD: str = os.getenv("LINKEDIN_PASSWORD", "")
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 
-# Multiple API keys: comma-separated in .env or set at runtime from frontend
+# Gemini model used for all form-filling / classification calls.
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+# Multiple API keys: comma-separated in .env (e.g. "key1,key2,key3").
+# When one key hits its quota the engine rotates to the next automatically.
 GEMINI_API_KEYS: list = [k.strip() for k in GEMINI_API_KEY.split(",") if k.strip()]
 CURRENT_GEMINI_INDEX: int = 0
 

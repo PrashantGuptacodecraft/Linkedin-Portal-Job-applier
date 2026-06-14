@@ -26,39 +26,71 @@ from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 async def _call_gemini_with_retry(client, prompt: str, retries: int = 4) -> Any:
-    """Wrapper around Gemini API calls to handle 429 Rate Limit and 503 errors."""
-    for attempt in range(retries):
+    """Call Gemini, rotating through every configured API key on quota/rate-limit
+    (429) before falling back to a timed wait. Also retries transient 503s.
+
+    Add more keys by setting GEMINI_API_KEY to a comma-separated list in .env."""
+    from .config import rotate_gemini_key, get_current_gemini_key, GEMINI_API_KEYS, GEMINI_MODEL
+    import google.generativeai as genai
+
+    n_keys = max(1, len(GEMINI_API_KEYS))
+    # Enough attempts to try every key at least once, plus a couple of timed waits.
+    max_attempts = max(retries, n_keys + 2)
+    keys_tried_this_round = 1  # the current key counts as already tried
+
+    for attempt in range(max_attempts):
         try:
-            if hasattr(client, 'generate_content_async'):
-                response = await client.generate_content_async(prompt)
-            else:
-                loop = asyncio.get_running_loop()
-                response = await loop.run_in_executor(None, client.generate_content, prompt)
-            return response
+            if hasattr(client, "generate_content_async"):
+                return await client.generate_content_async(prompt)
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, client.generate_content, prompt)
         except Exception as e:
             err_str = str(e)
-            if attempt < retries - 1:
-                wait_time = 5.0
-                if "429" in err_str or "Quota exceeded" in err_str:
-                    from .config import rotate_gemini_key, GEMINI_API_KEYS
-                    import google.generativeai as genai
-
-                    if len(GEMINI_API_KEYS) > 1:
-                        new_key = rotate_gemini_key()
-                        logger.warning(f"Gemini API Quota Exceeded. Rotated to new key: {new_key[:8]}... Retrying immediately (attempt {attempt+1}/{retries}).")
-                        genai.configure(api_key=new_key)
-                        client = genai.GenerativeModel("gemini-2.0-flash")
-                        continue # Retry immediately with new key
-                    else:
-                        wait_time = 40.0
-                        match = re.search(r'retry in ([0-9.]+)s', err_str)
-                        if match:
-                            wait_time = float(match.group(1)) + 1.0
-                logger.warning(f"Gemini API Error: {err_str[:100]}... Waiting {wait_time:.1f}s before retry {attempt+1}/{retries}...")
-                await asyncio.sleep(wait_time)
-            else:
-                logger.error("Gemini API max retries exceeded.")
+            err_low = err_str.lower()
+            if attempt >= max_attempts - 1:
+                logger.error(f"Gemini API failed after {attempt + 1} attempts: {err_str[:120]}")
                 raise e
+
+            is_quota = ("429" in err_str or "quota" in err_low
+                        or "rate limit" in err_low or "resource_exhausted" in err_low)
+            is_overload = ("503" in err_str or "overloaded" in err_low or "unavailable" in err_low)
+
+            # Rotate to the next key and retry immediately while keys remain untried.
+            if is_quota and n_keys > 1 and keys_tried_this_round < n_keys:
+                new_key = rotate_gemini_key()
+                keys_tried_this_round += 1
+                logger.warning(
+                    f"Gemini quota hit — rotating to key {new_key[:8]}… "
+                    f"({keys_tried_this_round}/{n_keys}) and retrying immediately."
+                )
+                try:
+                    genai.configure(api_key=new_key)
+                    client = genai.GenerativeModel(GEMINI_MODEL)
+                except Exception:
+                    pass
+                continue
+
+            # All keys exhausted this round (or single key / transient error): wait.
+            wait_time = 5.0
+            if is_quota:
+                wait_time = 40.0
+                m = re.search(r"retry in ([0-9.]+)s", err_str)
+                if m:
+                    wait_time = float(m.group(1)) + 1.0
+            elif is_overload:
+                wait_time = 10.0
+            logger.warning(
+                f"Gemini error: {err_str[:100]}… waiting {wait_time:.1f}s "
+                f"(attempt {attempt + 1}/{max_attempts})."
+            )
+            await asyncio.sleep(wait_time)
+            # Start a fresh rotation round from the current key after waiting.
+            keys_tried_this_round = 1
+            try:
+                genai.configure(api_key=get_current_gemini_key())
+                client = genai.GenerativeModel(GEMINI_MODEL)
+            except Exception:
+                pass
 
 
 from playwright.async_api import BrowserContext, Page, TimeoutError as PWTimeout
@@ -1358,7 +1390,7 @@ def _city(location: Optional[str]) -> str:
 # ── Universal AI Handler (Fallback) ──────────────────────────────────────────
 
 async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_credentials: Optional[Any], emit: Optional[Any] = None, session_id: str = "default") -> int:
-    from .config import get_current_gemini_key, get_portal_credentials
+    from .config import get_current_gemini_key, get_portal_credentials, GEMINI_MODEL
     from .browser import human_delay
     from pathlib import Path
     import json
@@ -1370,8 +1402,8 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
         
     import google.generativeai as genai
     genai.configure(api_key=current_key)
-    client = genai.GenerativeModel("gemini-2.0-flash")
-    
+    client = genai.GenerativeModel(GEMINI_MODEL)
+
     filled_count = 0
     
     for step in range(8):
@@ -1595,9 +1627,9 @@ async def ai_answer_unknown_field(field_label: str, field_type: str, candidate: 
     """Upgrade 2: AI-powered field answering for unknown questions using Gemini."""
     import google.generativeai as genai
     import json
-    from .config import get_current_gemini_key
+    from .config import get_current_gemini_key, GEMINI_MODEL
     genai.configure(api_key=get_current_gemini_key())
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    model = genai.GenerativeModel(GEMINI_MODEL)
     
     profile_json = candidate.model_dump_json(exclude={'resume_path'})
     prompt_string = f"""You are filling a job application form on behalf of a candidate. The field label is: {field_label}. The field type is: {field_type}. Here is everything known about the candidate as JSON: {profile_json}. Based on this, what is the most appropriate answer for this field? Rules: if the candidate profile does not contain a direct answer, use the safest most common answer that would not disqualify them. For yes/no questions about things not in the profile such as security clearance, default to No. For location preference, use the candidate's stored preferred_location or location field. For citizenship and work authorization questions, use the work_authorization field. For questions about salary, use salary_expectation field or leave blank if empty. Return ONLY the answer value as a plain string with absolutely no explanation, no punctuation around it, no quotes."""
