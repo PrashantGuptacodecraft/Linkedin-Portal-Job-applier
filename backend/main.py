@@ -130,6 +130,7 @@ def _run_pipeline_in_thread(
     queue: asyncio.Queue,
     main_loop: asyncio.AbstractEventLoop,
     stop_event: threading.Event = None,
+    session_id: str = None,
     *,
     apply_external: bool = True,
 ):
@@ -145,7 +146,7 @@ def _run_pipeline_in_thread(
     async def _inner():
         try:
             logger.info("Pipeline thread: starting pipeline…")
-            await run_pipeline(req, emit=emit, apply_external=apply_external, stop_event=stop_event)
+            await run_pipeline(req, emit=emit, apply_external=apply_external, stop_event=stop_event, session_id=session_id)
         except Exception as exc:
             tb = traceback.format_exc()
             logger.error(f"Pipeline thread uncaught: {exc}\n{tb}")
@@ -271,11 +272,13 @@ async def auto_apply(req: AutoApplyRequest):
     main_loop = asyncio.get_running_loop()
     queue: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue()
     stop_event = threading.Event()
+    session_id = str(uuid.uuid4())[:8]
+    _active_stop_events[session_id] = stop_event
 
     # Launch pipeline in a background thread
     thread = threading.Thread(
         target=_run_pipeline_in_thread,
-        args=(req, queue, main_loop, stop_event),
+        args=(req, queue, main_loop, stop_event, session_id),
         kwargs={"apply_external": True},
         daemon=True,
     )
@@ -343,9 +346,7 @@ async def _sse_generator(
             except Exception as exc:
                 logger.debug(f"SSE serialise error: {exc}")
     except asyncio.CancelledError:
-        logger.info("Client disconnected (Stop), signalling pipeline to stop.")
-        if stop_event:
-            stop_event.set()
+        logger.info("SSE client disconnected from stream.")
         raise
 
 
@@ -396,6 +397,53 @@ async def get_diagnostic_file(dir_name: str, filename: str):
         content = await fh.read()
     return JSONResponse({"content": content})
 
+
+# ── Control endpoints ──────────────────────────────────────────────────────────
+
+from pydantic import BaseModel
+
+class SessionControlRequest(BaseModel):
+    session_id: str
+
+@app.post("/api/pause")
+async def pause_session(req: SessionControlRequest):
+    try:
+        from .portal import trigger_pause_external
+    except ImportError:
+        from portal import trigger_pause_external
+    
+    trigger_pause_external(req.session_id)
+    return {"status": "paused"}
+
+# Global dictionary to hold stop events
+_active_stop_events = {}
+
+@app.post("/api/stop")
+async def stop_session(req: SessionControlRequest):
+    if req.session_id in _active_stop_events:
+        _active_stop_events[req.session_id].set()
+        return {"status": "stopping"}
+    return {"status": "not_found"}
+
+@app.post("/api/resume")
+async def resume_session(req: SessionControlRequest):
+    try:
+        from .portal import trigger_resume_external
+    except ImportError:
+        from portal import trigger_resume_external
+        
+    trigger_resume_external(req.session_id)
+    return {"status": "resuming"}
+
+@app.get("/api/status")
+async def get_status(session_id: str):
+    try:
+        from .portal import get_pause_status
+    except ImportError:
+        from portal import get_pause_status
+        
+    status = get_pause_status(session_id)
+    return {"status": "ok", "session_id": session_id, **status}
 
 # ── Health check ──────────────────────────────────────────────────────────────
 

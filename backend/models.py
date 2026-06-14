@@ -86,7 +86,7 @@ class AutoApplyRequest(BaseModel):
     candidate:  CandidateProfile = Field(default_factory=CandidateProfile)
     login_credentials: LoginCredentials = Field(default_factory=LoginCredentials)
     filters:    SearchFilters = Field(default_factory=SearchFilters)
-    max_jobs:   int  = Field(default=5, ge=1, le=25)
+    max_jobs:   int  = Field(default=5, ge=1, le=100)
     headless:   bool = False
 
 

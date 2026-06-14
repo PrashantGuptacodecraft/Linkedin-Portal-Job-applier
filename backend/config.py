@@ -36,6 +36,25 @@ LINKEDIN_PASSWORD: str = os.getenv("LINKEDIN_PASSWORD", "")
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 
+# Multiple API keys: comma-separated in .env or set at runtime from frontend
+GEMINI_API_KEYS: list = [k.strip() for k in GEMINI_API_KEY.split(",") if k.strip()]
+CURRENT_GEMINI_INDEX: int = 0
+
+def get_current_gemini_key() -> str:
+    global CURRENT_GEMINI_INDEX
+    if not GEMINI_API_KEYS:
+        return ""
+    return GEMINI_API_KEYS[CURRENT_GEMINI_INDEX % len(GEMINI_API_KEYS)]
+
+def rotate_gemini_key() -> str:
+    global CURRENT_GEMINI_INDEX
+    if not GEMINI_API_KEYS:
+        return ""
+    CURRENT_GEMINI_INDEX = (CURRENT_GEMINI_INDEX + 1) % len(GEMINI_API_KEYS)
+    import logging
+    logging.getLogger(__name__).info(f"Rotated Gemini API Key to index {CURRENT_GEMINI_INDEX} (starts with {GEMINI_API_KEYS[CURRENT_GEMINI_INDEX][:8]}...)")
+    return GEMINI_API_KEYS[CURRENT_GEMINI_INDEX]
+
 # ── Portal Settings ───────────────────────────────────────────────────────────
 
 PORTAL_EMAIL: str = os.getenv("PORTAL_EMAIL", "")
@@ -43,14 +62,45 @@ PORTAL_PASSWORD: str = os.getenv("PORTAL_PASSWORD", "")
 
 SKIP_DOMAINS = [d.strip() for d in os.getenv("SKIP_DOMAINS", "jooble.org,indeed.com").split(",") if d.strip()]
 
+SAFE_DEFAULTS = {
+    "18 or older": "Yes",
+    "authorized to work": "Yes",
+    "visa sponsorship": "No",
+    "require sponsorship": "No",
+    "worked here before": "No",
+    "previously employed": "No",
+    "felony": "No",
+    "convicted": "No",
+    "disability": "I do not have a disability",
+    "veteran": "I am not a veteran",
+    "gender": "Prefer not to say",
+    "ethnicity": "Prefer not to say",
+    "race": "Prefer not to say",
+    "pronouns": "Prefer not to say",
+    "salary": "", # Handled specifically to pull from candidate profile if present
+    "notice period": "2 weeks",
+    "start date": "Immediately",
+    "available": "Immediately",
+    "remote": "Yes",
+    "work from home": "Yes",
+    "willing to travel": "Minimal (less than 10%)",
+    "overtime": "Yes",
+    "background check": "Yes",
+    "drug test": "Yes",
+    "reference": "Available upon request"
+}
+
 class DomainSkippedError(Exception):
     """Raised when a URL's domain matches a domain in the SKIP_DOMAINS list."""
     pass
 
-def get_portal_credentials(url: str, request_creds: Optional[Any] = None) -> Dict[str, str]:
+def get_portal_credentials(url: str, request_creds: Optional[Any] = None, for_registration: bool = False) -> Dict[str, str]:
     """
-    Returns the portal email and deterministic password for the given domain.
-    Also logs the generated credential to data/portal_accounts.json.
+    Returns the portal email and password for the given domain.
+    
+    By default returns the raw (actual) password for LOGIN.
+    If for_registration=True, returns a deterministic generated password for new accounts.
+    Also logs the credential to data/portal_accounts.json.
     """
     import urllib.parse
     import hashlib
@@ -76,12 +126,14 @@ def get_portal_credentials(url: str, request_creds: Optional[Any] = None) -> Dic
         password_seed = PORTAL_PASSWORD
 
     if not email or not password_seed:
-        return {"email": "", "password": ""}
+        return {"email": "", "password": "", "generated_password": ""}
 
-    # Deterministic password generation
+    # For LOGIN: use the actual password the user provided
+    raw_password = password_seed
+
+    # For REGISTRATION: generate deterministic password from seed + domain
     raw = f"{password_seed}:{domain}"
     pw_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
-    # Ensure requirements: 1 uppercase, 1 special, 1 number
     generated_pw = pw_hash.capitalize() + "!1a"
 
     # Log to local file
@@ -102,7 +154,11 @@ def get_portal_credentials(url: str, request_creds: Optional[Any] = None) -> Dic
         import logging
         logging.getLogger(__name__).warning(f"Failed to log portal account: {e}")
 
-    return {"email": email, "password": generated_pw}
+    if for_registration:
+        return {"email": email, "password": generated_pw, "generated_password": generated_pw}
+    else:
+        # LOGIN: use actual password
+        return {"email": email, "password": raw_password, "generated_password": generated_pw}
 
 # ── Timing / safety ───────────────────────────────────────────────────────────
 

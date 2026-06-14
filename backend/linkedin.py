@@ -656,6 +656,15 @@ async def _resolve_external_apply_url(page: Page, safety_url: str) -> Optional[s
                     return href
         except Exception:
             pass
+            
+        # Try clicking any primary buttons (like 'Continue') if we couldn't extract the URL
+        try:
+            btn = await temp.query_selector("a.artdeco-button, button.artdeco-button, a[href*='http']")
+            if btn:
+                await btn.click()
+                await temp.wait_for_load_state("networkidle", timeout=6000)
+        except Exception:
+            pass
 
         if temp.url and 'linkedin.com' not in temp.url.lower() and _is_valid_portal_url(temp.url):
             logger.info(f"LinkedIn safety page navigated directly to external URL: {temp.url}")
@@ -900,16 +909,18 @@ async def discover_post_leads(page, max_leads: int) -> list:
         except Exception:
             pass
             
-        posts = await page.query_selector_all("div.feed-shared-update-v2")
+        posts = await page.query_selector_all("div.feed-shared-update-v2, div[data-urn*='activity'], li.reusable-search__result-container")
         for post in posts:
             if len(leads) >= max_leads:
                 break
                 
             try:
-                text_el = await post.query_selector("div.update-components-text")
-                if not text_el: continue
-                
-                text = await text_el.inner_text()
+                text_el = await post.query_selector("div.update-components-text, span.break-words, .feed-shared-text, .feed-shared-update-v2__commentary")
+                if not text_el:
+                    # Fallback to getting all text from the post
+                    text = await post.inner_text()
+                else:
+                    text = await text_el.inner_text()
                 
                 emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
                 if emails:
@@ -918,7 +929,7 @@ async def discover_post_leads(page, max_leads: int) -> list:
                         seen_emails.add(email)
                         
                         author = "Recruiter"
-                        author_el = await post.query_selector("span.update-components-actor__title")
+                        author_el = await post.query_selector("span.update-components-actor__title, span.dir-dir, .update-components-actor__name, .app-aware-link span[aria-hidden='true'], span.entity-result__title-text")
                         if author_el:
                             author_text = await author_el.inner_text()
                             author = author_text.split('\n')[0].strip()
@@ -926,7 +937,7 @@ async def discover_post_leads(page, max_leads: int) -> list:
                         leads.append({
                             "email": email,
                             "author": author,
-                            "text": text,
+                            "text": text[:500], # store a snippet instead of the whole thing if it's huge
                             "url": page.url
                         })
             except Exception as e:

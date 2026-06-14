@@ -1505,7 +1505,10 @@ input.error, textarea.error {
       <div class="stat-pill disconnected" id="backend-status">API: checking…</div>
       <div class="stat-pill" id="jobs-found-pill">0 JOBS</div>
       <div class="stat-pill" id="progress-pill">0% DONE</div>
+      <div class="stat-pill" id="pause-status-pill" style="display:none; color: var(--warn); border-color: var(--warn);">⏸ PAUSED (0s)</div>
       <div style="width:12px"></div>
+      <button class="btn btn-outline" id="pause-btn" style="display:none;" onclick="triggerPause()">⏸ Pause</button>
+      <button class="btn btn-primary" id="resume-btn" style="display:none; background: var(--success);" onclick="triggerResume()">▶ Resume (Space)</button>
       <button class="btn btn-primary" id="top-start-btn" onclick="startRun()">▶ Start Automation</button>
       <button class="btn btn-danger" id="top-stop-btn" disabled onclick="stopRun()">■ Stop</button>
     </div>
@@ -1720,11 +1723,11 @@ input.error, textarea.error {
         <div class="row">
           <div class="form-group">
             <label>Email</label>
-            <input type="email" id="email" value="adityagupta983869@gmail.com" placeholder="you@example.com" />
+            <input type="email" id="email" value="" placeholder="you@example.com" />
           </div>
           <div class="form-group">
             <label>Phone</label>
-            <input type="tel" id="phone" value="+91-9838693305" placeholder="+91 98XXXXXX05" />
+            <input type="tel" id="phone" value="+1-415-555-0198" placeholder="+1 415XXXXX98" />
           </div>
         </div>
         <div class="row">
@@ -1837,7 +1840,7 @@ input.error, textarea.error {
 First Name: Prashant
 Last Name: Gupta
 Email Address: prashant983869@gmail.com
-Phone Number: +91 9838693305
+Phone Number: +1 415-555-0198
 City: San Francisco
 State: California
 Zip Code: 94105
@@ -2001,7 +2004,7 @@ Ideal role(s): Java Developer, Backend Developer</textarea>
         <div class="card-title" style="margin-bottom:.7rem"><span class="icon">🪪</span> Resume Preview</div>
         <h3 id="preview-name">Prashant Gupta</h3>
         <div class="preview-line" id="preview-role">Java Developer</div>
-        <div class="preview-line" id="preview-contact">+91-9838693305 · adityagupta983869@gmail.com</div>
+        <div class="preview-line" id="preview-contact">+91-9838693305 · you@example.com</div>
         <div class="preview-line" id="preview-location">Ghaziabad, India</div>
         <div class="preview-pills" id="skills-pill-list">
           <span class="preview-pill">Java</span>
@@ -2030,7 +2033,7 @@ Ideal role(s): Java Developer, Backend Developer</textarea>
       <div class="row triple">
         <div class="form-group">
           <label>Max jobs</label>
-          <input type="number" id="max_jobs" value="5" min="1" max="25" />
+          <input type="number" id="max_jobs" value="5" min="1" max="100" />
         </div>
         <div class="form-group">
           <label>Locations <span class="hint">(comma-sep)</span></label>
@@ -2516,8 +2519,8 @@ function resetProfileFields() {
   const defaults = {
     name: 'Prashant Gupta',
     target_role: 'Java Developer + C2C',
-    email: 'adityagupta983869@gmail.com',
-    phone: '+91-9838693305',
+    email: '',
+    phone: '',
     location: 'Ghaziabad, India',
     linkedin_url: 'https://www.linkedin.com/in/prashant-gupta-9',
     cover_text: 'I am interested in Java backend roles and can tailor my resume for the job description.',
@@ -2645,8 +2648,8 @@ async function readApiResponse(res) {
 function refreshResumePreview() {
   const name = v('name') || 'Prashant Gupta';
   const role = v('target_role') || 'Java Developer + C2C';
-  const email = v('email') || 'adityagupta983869@gmail.com';
-  const phone = v('phone') || '+91-9838693305';
+  const email = v('email') || '';
+  const phone = v('phone') || '';
   const location = v('location') || 'Ghaziabad, India';
   const skillsRaw = v('technical_skills') || 'Java, Spring Boot, Hibernate/JPA, REST APIs';
   const skills = skillsRaw.split(',').map((item) => item.trim()).filter(Boolean).slice(0, 7);
@@ -2886,7 +2889,8 @@ async function startRun() {
       let errMsg = `Server error ${res.status}`;
       try {
         const err = await res.json();
-        errMsg += `: ${err.detail || JSON.stringify(err)}`;
+        const detailStr = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
+        errMsg += `: ${detailStr || JSON.stringify(err)}`;
       } catch {}
       logLine('error', errMsg);
       setRunning(false);
@@ -2920,16 +2924,48 @@ async function startRun() {
   }
 }
 
-function stopRun() {
-  if (abortCtrl) {
-    abortCtrl.abort();
-    logLine('warn', 'Run aborted by user.');
+async function stopRun() {
+  if (!isRunning) return;
+  if (abortCtrl) abortCtrl.abort();
+  
+  if (currentSessionId) {
+    try {
+      await fetch(`${API}/api/stop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: currentSessionId })
+      });
+    } catch(e) {
+      console.warn("Failed to stop backend pipeline:", e);
+    }
   }
+  
+  logLine('system', 'Run stopped by user.');
   setRunning(false);
 }
 
 function setRunning(running) {
   isRunning = running;
+  
+  const pauseBtn    = document.getElementById('pause-btn');
+  const resumeBtn   = document.getElementById('resume-btn');
+  const pauseStatus = document.getElementById('pause-status-pill');
+
+  if (running) {
+    if (!statusPollInterval) {
+      statusPollInterval = setInterval(pollStatus, 1000);
+    }
+    if (pauseBtn) pauseBtn.style.display = 'inline-flex';
+  } else {
+    if (statusPollInterval) {
+      clearInterval(statusPollInterval);
+      statusPollInterval = null;
+    }
+    if (pauseBtn) pauseBtn.style.display = 'none';
+    if (resumeBtn) resumeBtn.style.display = 'none';
+    if (pauseStatus) pauseStatus.style.display = 'none';
+  }
+  
   const startBtn    = document.getElementById('start-btn');
   const stopBtn     = document.getElementById('stop-btn');
   const topStart    = document.getElementById('top-start-btn');
@@ -2959,7 +2995,47 @@ function setRunning(running) {
    SSE EVENT HANDLER
    ═══════════════════════════════════════════════════════════════════════════ */
 function handleEvent(evt) {
+  if (evt.session_id) {
+    currentSessionId = evt.session_id;
+  }
   switch (evt.type) {
+
+    case 'manual_takeover':
+      document.getElementById('manual-alert').classList.add('visible');
+      document.querySelector('#manual-alert span:last-child').textContent = evt.reason || 'Bot paused. Manual intervention required.';
+      document.getElementById('pause-status-pill').style.display = 'block';
+      document.getElementById('pause-status-pill').textContent = '⏸ PAUSED (0s)';
+      document.getElementById('resume-btn').style.display = 'inline-flex';
+      document.getElementById('pause-btn').style.display = 'none';
+      logLine('warn', `⏸ Bot paused: ${evt.reason || 'Manual intervention needed'}`);
+      break;
+
+    case 'bot_resumed': {
+      document.getElementById('manual-alert').classList.remove('visible');
+      document.getElementById('pause-status-pill').style.display = 'none';
+      document.getElementById('resume-btn').style.display = 'none';
+      document.getElementById('pause-btn').style.display = 'inline-flex';
+      logLine('system', evt.message || '▶ Bot resuming in 3 seconds...');
+      
+      let cd = 3;
+      const cdEl = document.getElementById('pause-status-pill');
+      cdEl.style.display = 'block';
+      cdEl.style.color = 'var(--accent)';
+      cdEl.style.borderColor = 'var(--accent)';
+      
+      const cdInt = setInterval(() => {
+        if (cd <= 0) {
+          clearInterval(cdInt);
+          cdEl.style.display = 'none';
+          cdEl.style.color = 'var(--warn)';
+          cdEl.style.borderColor = 'var(--warn)';
+        } else {
+          cdEl.textContent = `▶ RESUMING IN ${cd}...`;
+          cd--;
+        }
+      }, 1000);
+      break;
+    }
 
     case 'log':
       logLine(evt.level || 'info', evt.message);
@@ -3006,12 +3082,88 @@ function handleEvent(evt) {
 
     case 'done':
       document.getElementById('manual-alert').classList.remove('visible');
+      document.getElementById('pause-btn').style.display = 'none';
+      document.getElementById('resume-btn').style.display = 'none';
+      document.getElementById('pause-status-pill').style.display = 'none';
       logLine('success', '✓ Run complete!');
       setProgress(100);
       updatePills();
       break;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PAUSE / RESUME CONTROL
+   ═══════════════════════════════════════════════════════════════════════════ */
+let currentSessionId = null;
+let statusPollInterval = null;
+
+async function triggerPause() {
+  if (!currentSessionId) return;
+  try {
+    await fetch(`${API}/api/pause`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: currentSessionId })
+    });
+    // Optimistic UI
+    document.getElementById('pause-btn').style.display = 'none';
+    document.getElementById('resume-btn').style.display = 'inline-flex';
+    document.getElementById('pause-status-pill').style.display = 'block';
+  } catch (err) {
+    console.error("Failed to pause", err);
+  }
+}
+
+async function triggerResume() {
+  if (!currentSessionId) return;
+  try {
+    await fetch(`${API}/api/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: currentSessionId })
+    });
+  } catch (err) {
+    console.error("Failed to resume", err);
+  }
+}
+
+async function pollStatus() {
+  if (!currentSessionId || !isRunning) return;
+  try {
+    const res = await fetch(`${API}/api/status?session_id=${currentSessionId}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.paused) {
+        document.getElementById('pause-status-pill').textContent = `⏸ PAUSED (${data.pause_duration_seconds}s)`;
+        document.getElementById('pause-status-pill').style.display = 'block';
+        document.getElementById('pause-btn').style.display = 'none';
+        document.getElementById('resume-btn').style.display = 'inline-flex';
+      }
+    }
+  } catch (e) {
+    // Ignore errors for polling
+  }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!isRunning || !currentSessionId) return;
+  
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    triggerPause();
+  } else if (e.key === ' ' || e.code === 'Space') {
+    // Don't trigger if user is typing in an input
+    if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+      return;
+    }
+    const resumeBtn = document.getElementById('resume-btn');
+    if (resumeBtn && resumeBtn.style.display !== 'none') {
+      e.preventDefault();
+      triggerResume();
+    }
+  }
+});
 
 /* ═══════════════════════════════════════════════════════════════════════════
    UI HELPERS

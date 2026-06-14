@@ -24,7 +24,8 @@ async def send_c2c_application_email(
         
     try:
         # Generate personalized email body
-        genai.configure(api_key=gemini_api_key)
+        from .config import get_current_gemini_key
+        genai.configure(api_key=get_current_gemini_key())
         model = genai.GenerativeModel("gemini-2.0-flash")
         
         prompt = f"""

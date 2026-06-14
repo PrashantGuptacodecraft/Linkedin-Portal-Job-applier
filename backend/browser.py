@@ -56,6 +56,90 @@ Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
 Object.defineProperty(navigator, 'languages', { get: () => ['en-US','en'] });
 window.chrome = { runtime: {} };
+
+if (window === window.top) {
+    window.addEventListener('DOMContentLoaded', () => {
+        if (document.getElementById('antigravity-bot-widget')) return;
+
+        const widget = document.createElement('div');
+        widget.id = 'antigravity-bot-widget';
+        widget.style.cssText = `
+            position: fixed; bottom: 16px; right: 16px; z-index: 2147483647;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        `;
+        widget.innerHTML = `
+            <style>
+                #ag-dot { width: 18px; height: 18px; border-radius: 50%; background: #22c55e;
+                    box-shadow: 0 0 8px rgba(34,197,94,0.6); transition: all 0.3s; cursor: pointer;
+                    display: flex; align-items: center; justify-content: center; font-size: 10px; color: white; }
+                #ag-dot.paused { background: #ef4444; box-shadow: 0 0 12px rgba(239,68,68,0.7);
+                    animation: ag-pulse 1.5s infinite; }
+                @keyframes ag-pulse { 0%,100%{box-shadow:0 0 8px rgba(239,68,68,0.5)} 50%{box-shadow:0 0 18px rgba(239,68,68,0.9)} }
+                #ag-panel { display: none; background: rgba(15,15,25,0.92); backdrop-filter: blur(12px);
+                    border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 12px 16px;
+                    min-width: 220px; margin-bottom: 8px; color: #e2e8f0; font-size: 13px;
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+                #ag-panel.visible { display: block; animation: ag-fadeIn 0.2s ease-out; }
+                @keyframes ag-fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+                #ag-status { font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+                #ag-reason { font-size: 12px; color: #94a3b8; margin-bottom: 10px; line-height: 1.4;
+                    max-height: 60px; overflow-y: auto; }
+                #ag-resume-btn { display: none; width: 100%; padding: 8px; border: none; border-radius: 8px;
+                    background: linear-gradient(135deg, #22c55e, #16a34a); color: white; font-weight: 700;
+                    font-size: 13px; cursor: pointer; transition: transform 0.1s, box-shadow 0.2s;
+                    box-shadow: 0 2px 8px rgba(34,197,94,0.3); }
+                #ag-resume-btn:hover { transform: scale(1.03); box-shadow: 0 4px 16px rgba(34,197,94,0.5); }
+                #ag-resume-btn.visible { display: block; }
+            </style>
+            <div id="ag-panel">
+                <div id="ag-status"><span id="ag-status-dot" style="width:8px;height:8px;border-radius:50%;background:#22c55e;"></span><span id="ag-status-text">Bot Active</span></div>
+                <div id="ag-reason"></div>
+                <button id="ag-resume-btn">▶ RESUME BOT</button>
+            </div>
+            <div id="ag-dot" title="Antigravity Bot">⚡</div>
+        `;
+
+        (document.body || document.documentElement).appendChild(widget);
+
+        const dot = document.getElementById('ag-dot');
+        const panel = document.getElementById('ag-panel');
+        let panelOpen = false;
+
+        dot.addEventListener('click', () => {
+            panelOpen = !panelOpen;
+            panel.classList.toggle('visible', panelOpen);
+        });
+
+        document.getElementById('ag-resume-btn').addEventListener('click', async () => {
+            document.getElementById('ag-status-text').textContent = 'Resuming...';
+            document.getElementById('ag-resume-btn').style.display = 'none';
+            try { if (window.antigravityResumeBot) await window.antigravityResumeBot(); } catch(e) { console.error(e); }
+        });
+
+        window.showAntigravityPauseUI = (reason) => {
+            dot.classList.add('paused');
+            dot.textContent = '⏸';
+            document.getElementById('ag-status-dot').style.background = '#ef4444';
+            document.getElementById('ag-status-text').textContent = 'PAUSED';
+            document.getElementById('ag-reason').textContent = reason || 'Manual action required';
+            document.getElementById('ag-resume-btn').classList.add('visible');
+            panel.classList.add('visible');
+            panelOpen = true;
+        };
+
+        window.hideAntigravityPauseUI = () => {
+            dot.classList.remove('paused');
+            dot.textContent = '⚡';
+            document.getElementById('ag-status-dot').style.background = '#22c55e';
+            document.getElementById('ag-status-text').textContent = 'Bot Active';
+            document.getElementById('ag-reason').textContent = '';
+            document.getElementById('ag-resume-btn').classList.remove('visible');
+            panel.classList.remove('visible');
+            panelOpen = false;
+        };
+    });
+}
 """
 
 
@@ -106,6 +190,7 @@ async def build_context(
     headless: bool = HEADLESS,
     console_buf: Optional[List[Dict[str, Any]]] = None,
     record_har: bool = True,
+    session_id: str = "default",
 ) -> tuple[Browser, BrowserContext]:
     """
     Launch Chromium and return (browser, context).
@@ -116,6 +201,7 @@ async def build_context(
     headless    : Show/hide the browser window.
     console_buf : If provided, all console messages are appended here.
     record_har  : Record a HAR trace for the whole session.
+    session_id  : The session ID for this browser context.
     """
     har_path = str(DIAGNOSTICS_DIR / "session.har") if record_har else ""
 

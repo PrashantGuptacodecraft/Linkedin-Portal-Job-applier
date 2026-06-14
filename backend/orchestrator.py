@@ -65,6 +65,7 @@ async def run_pipeline(
     *,
     apply_external: bool = True,
     stop_event: Optional[threading.Event] = None,
+    session_id: Optional[str] = None,
 ) -> SessionSummary:
     """
     Run the full automation pipeline.
@@ -72,11 +73,13 @@ async def run_pipeline(
     *emit* is a synchronous callback called with SSE event dicts.
     It is safe to call from any async context (the caller queues them).
     """
-    session_id = str(uuid.uuid4())[:8]
+    if not session_id:
+        session_id = str(uuid.uuid4())[:8]
     summary    = SessionSummary(session_id=session_id)
     console_buf: list = []
 
     def emit_event(event: Dict[str, Any]) -> None:
+        event["session_id"] = session_id
         summary.logs.append(event)
         if emit:
             try:
@@ -94,6 +97,7 @@ async def run_pipeline(
                 headless=req.headless,
                 console_buf=console_buf,
                 record_har=True,
+                session_id=session_id,
             )
             diag = DiagnosticsCapture(console_buf)
             emit_event({"type": "log", "level": "info", "message": "Browser launched successfully."})
@@ -203,6 +207,7 @@ async def run_pipeline(
                         diag        = diag,
                         emit        = emit_event,
                         apply_external = apply_external,
+                        session_id  = session_id,
                     )
 
                     if result.error == "captcha_required" and job_url not in retried_jobs:
@@ -234,6 +239,7 @@ async def run_pipeline(
                         diag        = diag,
                         emit        = emit_event,
                         apply_external = apply_external,
+                        session_id  = session_id,
                     )
                     summary.results.append(result)
                     if result.status == JobStatus.APPLIED:
@@ -388,8 +394,11 @@ async def _process_one_job(
     diag:        DiagnosticsCapture,
     emit:        Callable,
     apply_external: bool,
+    session_id:  str,
 ) -> JobResult:
     """Run the full lifecycle for one job URL."""
+    from .portal import check_pause_state
+    await check_pause_state(session_id)
 
     _emit(emit, "job_start", index=idx, total=total,
           info={"url": job_url})
@@ -568,14 +577,70 @@ async def _process_one_job(
             _emit(emit, "log", level="warning", message=f"  ⚠ {err_msg}")
         else:
             logger.error(f"Portal autofill error for {result.apply_url}: {exc}")
-            result.status = JobStatus.FAILED
-            result.error  = err_msg
-            if portal_page:
-                result.diagnostics_dir = await diag.capture(
-                    portal_page, f"portal_crash_{result.job_id}"
-                )
+            
+            # PAUSE CHECKPOINT ON UNEXPECTED ERROR
+            from .portal import pause_checkpoint
+            await pause_checkpoint(session_id, emit, f"Unexpected error: {err_msg} — please check the browser and fix manually, then resume to continue.")
+            
+            is_submitted = False
+            try:
+                success_indicators = ["confirmation", "thank-you", "thank_you", "success", "submitted", "complete", "apply-complete"]
+                success_phrases = ["application submitted", "thank you for applying", "we have received your application", "application complete", "you have successfully applied", "your application has been received"]
+                
+                url = portal_page.url.lower() if portal_page else ""
+                body = await portal_page.inner_text('body') if portal_page else ""
+                body_lower = body.lower()
+                
+                if any(ind in url for ind in success_indicators) or any(phrase in body_lower for phrase in success_phrases):
+                    is_submitted = True
+            except Exception:
+                pass
+
+            if is_submitted:
+                _emit(emit, "log", level="info", message="Manual submission detected after pause. Skipping retry.")
+                result.status = JobStatus.APPLIED
+                result.filled_fields = max(result.filled_fields, 1)
+            else:
+                _emit(emit, "log", level="info", message="Retrying step once after manual intervention...")
+                try:
+                    portal_page_retry, filled, portal_state = await autofill_portal_form(
+                        context,
+                        portal_page if portal_page else apply_url_to_use,
+                        req.candidate,
+                        login_credentials=req.login_credentials,
+                        emit=emit,
+                        session_id=session_id
+                    )
+                    if portal_page_retry:
+                        portal_page = portal_page_retry
+                    result.filled_fields = filled
+                    result.portal_state = portal_state
+                    if filled > 0:
+                        result.status = JobStatus.APPLIED
+                        _emit(emit, "log", level="info", message=f"  ✓ Autofilled {filled} field(s) on portal after retry.")
+                    else:
+                        result.status = JobStatus.FAILED
+                        result.error = "No form fields could be filled on retry."
+                except Exception as retry_exc:
+                    logger.error(f"Portal autofill error after retry for {result.apply_url}: {retry_exc}")
+                    result.status = JobStatus.FAILED
+                    result.error  = str(retry_exc)
+                    if portal_page:
+                        result.diagnostics_dir = await diag.capture(
+                            portal_page, f"portal_crash_{result.job_id}"
+                        )
     finally:
         if portal_page:
+            if result.status == JobStatus.APPLIED:
+                import time, os
+                os.makedirs("screenshots", exist_ok=True)
+                safe_job_id = ''.join(c for c in result.job_id if c.isalnum()) if result.job_id else "unknown"
+                screenshot_path = f"screenshots/applied_{safe_job_id}_{int(time.time())}.png"
+                try:
+                    await portal_page.screenshot(path=screenshot_path, full_page=True)
+                    _emit(emit, "log", level="success", message=f"Application screenshot saved: {screenshot_path}")
+                except Exception:
+                    pass
             try:
                 await portal_page.close()
             except Exception:
