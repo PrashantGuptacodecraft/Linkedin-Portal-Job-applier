@@ -109,6 +109,19 @@ _pause_events: Dict[str, asyncio.Event] = {}
 _manual_modes: Dict[str, bool] = {}
 _pause_timestamps: Dict[str, float] = {}
 
+# ── AI answer cache ───────────────────────────────────────────────────────────
+# Maps a content signature (question + options + profile hash) → answer string so
+# identical fields across pages/portals in a run don't re-hit Gemini. Keyed by
+# CONTENT (not per-page ai_id) so it survives across pages and portals.
+_AI_ANSWER_CACHE: Dict[str, str] = {}
+
+
+def _ai_cache_key(question: str, options: Any, profile_json: str) -> str:
+    import hashlib
+    opts = "|".join(sorted(str(o) for o in (options or [])))
+    prof = hashlib.sha1(profile_json.encode("utf-8", "ignore")).hexdigest()[:8]
+    return f"{_norm(question)}||{opts}||{prof}"
+
 def get_pause_status(session_id: str) -> Dict[str, Any]:
     is_paused = False
     if session_id in _pause_events and not _pause_events[session_id].is_set():
@@ -235,17 +248,24 @@ async def autofill_portal_form(
     login_credentials: Optional[Any] = None,
     emit: Optional[Any] = None,
     session_id: str = "default",
-) -> Tuple[Page, int, Optional[str]]:
+) -> Tuple[Page, int, Optional[str], str]:
     """
     Open *apply_target* (URL or Page), autofill the application form, and
     attempt to upload the resume.
+
+    Returns (page, filled_count, portal_state, outcome) where outcome is one of
+    "confirmed" | "submitted_unconfirmed" | "filled" | "blocked" | "none".
     """
     import urllib.parse
-    from .config import SKIP_DOMAINS, DomainSkippedError
-    try:
-        from playwright_stealth import stealth_async
-    except ImportError:
+    from .config import SKIP_DOMAINS, DomainSkippedError, USE_PATCHRIGHT
+    # Patchright applies stealth natively — don't stack playwright_stealth on top.
+    if USE_PATCHRIGHT:
         stealth_async = None
+    else:
+        try:
+            from playwright_stealth import stealth_async
+        except ImportError:
+            stealth_async = None
 
     # Check SKIP_DOMAINS
     target_url = getattr(apply_target, 'url', str(apply_target))
@@ -357,76 +377,82 @@ async def autofill_portal_form(
 
     filled += await _discover_and_click_apply(page)
 
-    adapter_matched = False
+    # ── Layer 0: Resume-first upload ──────────────────────────────────────
+    # Big ATSes (Workday/Greenhouse/etc.) auto-populate fields by parsing the
+    # uploaded resume. Uploading BEFORE typing lets the parser do the work and
+    # avoids fighting parser overwrites. Best-effort; the file input may only
+    # appear later, in which case Layer 5 / the AI loop will handle it.
+    if candidate.resume_path:
+        try:
+            filled += await _upload_resume_basic(page, candidate.resume_path)
+        except Exception as exc:
+            logger.debug(f"Resume-first upload error: {exc}")
+
+    # ── Layer 1: Known-portal adapter as PRE-FILL enrichment ──────────────
+    # NOTE: adapters no longer terminate the flow. They only pre-fill the
+    # fields they know; the semantic layers and the AI submit loop ALWAYS run
+    # afterwards so every portal gets classify → fill → submit → confirm.
     for pattern, adapter in _PORTAL_ADAPTERS:
         try:
             page_url = page.url or ''
         except Exception:
             page_url = ''
         if pattern.search(str(apply_url or '')) or pattern.search(page_url):
-            logger.info(f"Using portal adapter: {adapter.__name__}")
-            filled += await adapter(page, candidate)
-            adapter_matched = True
+            logger.info(f"Pre-filling via portal adapter: {adapter.__name__}")
+            try:
+                filled += await adapter(page, candidate)
+            except Exception as exc:
+                logger.debug(f"Adapter {adapter.__name__} pre-fill error: {exc}")
             break
 
-    if not adapter_matched:
-        # ── Layer 2: Semantic fill (reliable, no AI needed) ───────────────
-        logger.info("No static adapter matched. Running semantic fill layers first...")
+    # ── Layer 2: Semantic fill (reliable, no AI needed) ───────────────────
+    logger.info("Running semantic fill layers...")
+    if emit:
+        emit({"type": "log", "level": "info", "message": "Running semantic form fill..."})
+    semantic_filled = await _semantic_fill(page, candidate)
+    filled += semantic_filled
+    logger.info(f"Semantic fill: {semantic_filled} field(s)")
+
+    # ── Layer 2b: React phone input ───────────────────────────────────────
+    try:
+        filled += await _fill_react_phone_input(page, candidate)
+    except Exception as exc:
+        logger.debug(f"React phone fill error: {exc}")
+
+    # ── Layer 3: Ant Design custom selects ────────────────────────────────
+    try:
+        filled += await _fill_ant_design_selects(page, candidate)
+    except Exception as exc:
+        logger.debug(f"Ant Design select fill error: {exc}")
+
+    # ── Layer 4: Native dropdown selects ──────────────────────────────────
+    try:
+        filled += await _fill_dropdowns(page, candidate)
+    except Exception as exc:
+        logger.debug(f"Dropdown fill error: {exc}")
+
+    # ── Layer 6: Dispatch React events to register values ─────────────────
+    try:
+        await _dispatch_react_events(page)
+    except Exception as exc:
+        logger.debug(f"React event dispatch error: {exc}")
+
+    # ── Layer 7: AI submit loop (ALWAYS runs — handles radios, dropdowns,
+    #             multi-step wizards, and actual submission + confirmation) ──
+    outcome = "none"
+    logger.info("Handing over to AI Handler to finish remaining fields and submit...")
+    if emit:
+        emit({"type": "log", "level": "info", "message": "Initializing AI-powered application flow to finish remaining fields and submit..."})
+    try:
+        ai_filled, outcome = await _ai_fallback_handler(page, candidate, login_credentials, emit, session_id)
+        filled += ai_filled
+    except Exception as exc:
+        logger.error(f"AI fallback handler crashed: {exc}")
         if emit:
-            emit({"type": "log", "level": "info", "message": "Running semantic form fill..."})
-        semantic_filled = await _semantic_fill(page, candidate)
-        filled += semantic_filled
-        logger.info(f"Semantic fill: {semantic_filled} field(s)")
+            emit({"type": "log", "level": "warning", "message": f"AI handler error: {exc}"})
 
-        # ── Layer 2b: React phone input ───────────────────────────────────
-        try:
-            phone_filled = await _fill_react_phone_input(page, candidate)
-            filled += phone_filled
-        except Exception as exc:
-            logger.debug(f"React phone fill error: {exc}")
-
-        # ── Layer 3: Ant Design custom selects ────────────────────────────
-        try:
-            ant_filled = await _fill_ant_design_selects(page, candidate)
-            filled += ant_filled
-        except Exception as exc:
-            logger.debug(f"Ant Design select fill error: {exc}")
-
-        # ── Layer 4: Native dropdown selects ──────────────────────────────
-        try:
-            dd_filled = await _fill_dropdowns(page, candidate)
-            filled += dd_filled
-        except Exception as exc:
-            logger.debug(f"Dropdown fill error: {exc}")
-
-        # ── Layer 5: Resume upload ────────────────────────────────────────
-        if candidate.resume_path:
-            try:
-                upload_filled = await _upload_resume_basic(page, candidate.resume_path)
-                filled += upload_filled
-            except Exception as exc:
-                logger.debug(f"Resume upload error: {exc}")
-
-        # ── Layer 6: Dispatch React events to register values ─────────────
-        try:
-            await _dispatch_react_events(page)
-        except Exception as exc:
-            logger.debug(f"React event dispatch error: {exc}")
-
-        # ── Layer 7: AI fallback (for radio buttons, dropdowns, and form submission)
-        logger.info(f"Semantic fill complete. Handing over to AI Handler for remaining fields (radio/checkbox) and submission...")
-        if emit:
-            emit({"type": "log", "level": "info", "message": "Initializing AI-powered application flow to finish remaining fields and submit..."})
-        try:
-            ai_filled = await _ai_fallback_handler(page, candidate, login_credentials, emit, session_id)
-            filled += ai_filled
-        except Exception as exc:
-            logger.error(f"AI fallback handler crashed: {exc}")
-            if emit:
-                emit({"type": "log", "level": "warning", "message": f"AI handler error: {exc}"})
-
-    logger.info(f"Portal autofill complete – {filled} field(s) filled.")
-    return page, filled, portal_state
+    logger.info(f"Portal autofill complete – {filled} field(s) filled (outcome: {outcome}).")
+    return page, filled, portal_state, outcome
 
 async def _discover_and_click_apply(page) -> int:
     """Look for 'Apply', 'Apply Now' buttons and click them to open the form.
@@ -1389,7 +1415,7 @@ def _city(location: Optional[str]) -> str:
 
 # ── Universal AI Handler (Fallback) ──────────────────────────────────────────
 
-async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_credentials: Optional[Any], emit: Optional[Any] = None, session_id: str = "default") -> int:
+async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_credentials: Optional[Any], emit: Optional[Any] = None, session_id: str = "default") -> Tuple[int, str]:
     from .config import get_current_gemini_key, get_portal_credentials, GEMINI_MODEL
     from .browser import human_delay
     from pathlib import Path
@@ -1398,14 +1424,15 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
     current_key = get_current_gemini_key()
     if not current_key:
         logger.warning("GEMINI_API_KEY not set. Cannot run Universal AI Handler.")
-        return 0
-        
+        return 0, "none"
+
     import google.generativeai as genai
     genai.configure(api_key=current_key)
     client = genai.GenerativeModel(GEMINI_MODEL)
 
     filled_count = 0
-    
+    outcome = "none"  # confirmed | submitted_unconfirmed | filled | blocked | none
+
     for step in range(8):
         if emit:
             emit({"type": "log", "level": "info", "message": f"AI Handler Step {step + 1}/8..."})
@@ -1446,10 +1473,12 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
             continue
 
         if page_type == "CAPTCHA":
+            outcome = "blocked"
             if emit:
                 emit({"type": "manual_login_required", "message": "CAPTCHA detected. Please solve it manually."})
             break
         elif page_type == "CONFIRMATION":
+            outcome = "confirmed"
             logger.info("Confirmation page detected — application appears submitted!")
             if emit:
                 emit({"type": "log", "level": "info", "message": "✓ Confirmation page detected — application submitted!"})
@@ -1539,6 +1568,7 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
             
             if not email or not password:
                 logger.warning("Missing portal credentials for login/register.")
+                outcome = "blocked"
                 break
             
             logger.info(f"Using {'generated' if is_register else 'actual'} password for {page_type}")
@@ -1618,10 +1648,18 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
             # Upgrade 7: Post-submit confirmation (returns status; never raises)
             status = await _post_submit_confirmation(page, emit)
             if status == "CONFIRMED":
+                outcome = "confirmed"
                 logger.info("Application confirmed — finishing AI handler.")
                 break
+            elif clicked:
+                # We clicked a Next/Submit button but couldn't confirm submission.
+                # Tentatively mark as submitted-unconfirmed; a later loop iteration
+                # may still reach a real CONFIRMATION page and upgrade this.
+                outcome = "submitted_unconfirmed"
 
-    return filled_count
+    if outcome == "none" and filled_count > 0:
+        outcome = "filled"
+    return filled_count, outcome
 
 async def ai_answer_unknown_field(field_label: str, field_type: str, candidate: CandidateProfile, api_key: str) -> str:
     """Upgrade 2: AI-powered field answering for unknown questions using Gemini."""
@@ -2547,19 +2585,31 @@ async def _batch_ai_answers(unknown: List[Dict], profile_json: str, client: Any,
     except Exception:
         pass
 
+    # ── Consult the content-keyed cache first; only ask Gemini for misses ──────
+    cached: Dict[str, str] = {}
+    key_to_ck: Dict[str, str] = {}
     spec = []
     for f in unknown:
-        key = f.get("ai_id") or f.get("name") or f.get("label")
-        entry = {
-            "id": key,
-            "question": f.get("label") or f.get("group_label") or _humanize(f.get("name", "")),
-            "type": f["kind"],
-        }
-        if f.get("kind") == "radio_group":
-            entry["options"] = [o["label"] for o in f.get("options", []) if o.get("label")]
-        elif f.get("options"):
-            entry["options"] = f["options"]
+        key = str(f.get("ai_id") or f.get("name") or f.get("label"))
+        question = f.get("label") or f.get("group_label") or _humanize(f.get("name", ""))
+        opts = ([o["label"] for o in f.get("options", []) if o.get("label")]
+                if f.get("kind") == "radio_group" else f.get("options", []))
+        ck = _ai_cache_key(question, opts, profile_json)
+        key_to_ck[key] = ck
+        if ck in _AI_ANSWER_CACHE:
+            cached[key] = _AI_ANSWER_CACHE[ck]
+            continue
+        entry = {"id": key, "question": question, "type": f["kind"]}
+        if opts:
+            entry["options"] = opts
         spec.append(entry)
+
+    if cached and emit:
+        emit({"type": "log", "level": "info", "message": f"Reused {len(cached)} cached AI answer(s) — no API call."})
+
+    # Everything was cached → skip the network call entirely.
+    if not spec:
+        return cached
 
     prompt = (
         "You are auto-filling a job application form for a candidate. Use the candidate "
@@ -2581,17 +2631,23 @@ async def _batch_ai_answers(unknown: List[Dict], profile_json: str, client: Any,
         start, end = text.find("{"), text.rfind("}") + 1
         data = json.loads(text[start:end])
         if isinstance(data, dict) and data:
-            return {str(k): str(v) for k, v in data.items() if v not in (None, "")}
+            fresh = {str(k): str(v) for k, v in data.items() if v not in (None, "")}
+            for k, v in fresh.items():           # populate cache for reuse
+                if k in key_to_ck:
+                    _AI_ANSWER_CACHE[key_to_ck[k]] = v
+            return {**cached, **fresh}
     except Exception as e:
         logger.warning(f"Batch AI answer failed ({e}); falling back to per-field.")
 
-    # ── Fallback: per-field (now bug-free) ────────────────────────────────────
-    out: Dict[str, str] = {}
+    # ── Fallback: per-field (only for cache-miss fields) ──────────────────────
+    out: Dict[str, str] = dict(cached)
     for f in unknown:
-        key = f.get("ai_id") or f.get("name") or f.get("label")
+        key = str(f.get("ai_id") or f.get("name") or f.get("label"))
+        if key in cached:                        # already answered from cache
+            continue
         question = f.get("label") or f.get("group_label") or _humanize(f.get("name", ""))
-        opts = entry_opts = ([o["label"] for o in f.get("options", []) if o.get("label")]
-                             if f.get("kind") == "radio_group" else f.get("options", []))
+        opts = ([o["label"] for o in f.get("options", []) if o.get("label")]
+                if f.get("kind") == "radio_group" else f.get("options", []))
         if f.get("kind") == "textarea":
             p = (f"Write a concise 2-3 sentence professional answer for the job application "
                  f"field '{question}'. Candidate profile JSON: {profile_json}.")
@@ -2604,7 +2660,9 @@ async def _batch_ai_answers(unknown: List[Dict], profile_json: str, client: Any,
             r = await _call_gemini_with_retry(client, p)
             v = (r.text or "").strip()
             if v:
-                out[str(key)] = v
+                out[key] = v
+                if key in key_to_ck:             # cache per-field answers too
+                    _AI_ANSWER_CACHE[key_to_ck[key]] = v
         except Exception as e:
             logger.debug(f"Per-field AI failed for '{question}': {e}")
     return out

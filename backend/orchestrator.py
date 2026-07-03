@@ -26,7 +26,14 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
-from playwright.async_api import TimeoutError as PWTimeout, async_playwright
+# Prefer Patchright's driver (patched, undetected) when installed; the Python API
+# is identical, so the rest of the code is unchanged. Error classes are shared
+# with playwright, so PWTimeout still matches raised timeouts.
+try:
+    from patchright.async_api import async_playwright
+    from playwright.async_api import TimeoutError as PWTimeout
+except ImportError:
+    from playwright.async_api import TimeoutError as PWTimeout, async_playwright
 
 try:
     from .browser  import build_context, goto_with_retries, human_delay, save_session, new_stealth_page
@@ -511,20 +518,22 @@ async def _process_one_job(
 
         # If we already captured a portal Page, pass it directly to autofill.
         if portal_page:
-            portal_page, filled, portal_state = await autofill_portal_form(
+            portal_page, filled, portal_state, outcome = await autofill_portal_form(
                 context,
                 portal_page,
                 req.candidate,
                 login_credentials=req.login_credentials,
                 emit=emit,
+                session_id=session_id,
             )
         else:
-            portal_page, filled, portal_state = await autofill_portal_form(
+            portal_page, filled, portal_state, outcome = await autofill_portal_form(
                 context,
                 apply_url_to_use,
                 req.candidate,
                 login_credentials=req.login_credentials,
                 emit=emit,
+                session_id=session_id,
             )
         result.filled_fields = filled
         result.portal_state = portal_state
@@ -533,31 +542,50 @@ async def _process_one_job(
         elif portal_state in {"login_required", "captcha_required"}:
             result.needs_login = True
 
-        if filled > 0:
+        # ── Honest, confirmation-based status ─────────────────────────────
+        # APPLIED is reserved for a real submission confirmation. Merely
+        # filling fields is NOT "applied".
+        if outcome == "confirmed":
             result.status = JobStatus.APPLIED
-            _emit(emit, "log", level="info",
-                  message=f"  ✓ Autofilled {filled} field(s) on portal.")
+            _emit(emit, "log", level="success",
+                  message=f"  ✓ Application submitted & confirmed ({filled} field(s) filled).")
+        elif outcome == "submitted_unconfirmed":
+            result.status = JobStatus.MANUAL_REVIEW
+            result.error = "Submitted but confirmation not detected — please verify."
+            _emit(emit, "log", level="warning",
+                  message=f"  ⚠ Submit clicked but no confirmation detected ({filled} field(s)) – flagged for review.")
+            result.diagnostics_dir = await diag.capture(
+                portal_page, f"unconfirmed_{result.job_id}"
+            )
+        elif portal_state == "registration_required" or outcome == "blocked" and result.needs_registration:
+            result.status = JobStatus.SKIPPED
+            result.error = "Portal registration required"
+            _emit(emit, "log", level="warning", message="  ⚠ Registration detected on portal – manual step required.")
+        elif portal_state == "login_required":
+            result.status = JobStatus.SKIPPED
+            result.error = "Portal login required"
+            _emit(emit, "log", level="warning", message="  ⚠ Portal login required – manual step required.")
+        elif portal_state == "captcha_required" or outcome == "blocked":
+            result.status = JobStatus.SKIPPED
+            result.error = "Portal CAPTCHA / verification / login required"
+            _emit(emit, "log", level="warning", message="  ⚠ CAPTCHA / verification required – manual step required.")
+        elif filled > 0:
+            # Fields were filled but we never reached a submit/confirmation.
+            result.status = JobStatus.MANUAL_REVIEW
+            result.error = f"Filled {filled} field(s) but could not submit — please finish manually."
+            _emit(emit, "log", level="warning",
+                  message=f"  ⚠ Filled {filled} field(s) but no submission detected – flagged for review.")
+            result.diagnostics_dir = await diag.capture(
+                portal_page, f"filled_no_submit_{result.job_id}"
+            )
         else:
-            if portal_state == "registration_required":
-                result.status = JobStatus.SKIPPED
-                result.error = "Portal registration required"
-                _emit(emit, "log", level="warning", message="  ⚠ Registration detected on portal – manual step required.")
-            elif portal_state == "login_required":
-                result.status = JobStatus.SKIPPED
-                result.error = "Portal login required"
-                _emit(emit, "log", level="warning", message="  ⚠ Portal login required – manual step required.")
-            elif portal_state == "captcha_required":
-                result.status = JobStatus.SKIPPED
-                result.error = "Portal CAPTCHA / verification required"
-                _emit(emit, "log", level="warning", message="  ⚠ CAPTCHA / verification required – manual step required.")
-            else:
-                result.status = JobStatus.FAILED
-                result.error  = "No form fields could be filled."
-                _emit(emit, "log", level="warning",
-                      message="  ⚠ No fields filled – check diagnostics.")
-                result.diagnostics_dir = await diag.capture(
-                    portal_page, f"no_fill_{result.job_id}"
-                )
+            result.status = JobStatus.FAILED
+            result.error  = "No form fields could be filled."
+            _emit(emit, "log", level="warning",
+                  message="  ⚠ No fields filled – check diagnostics.")
+            result.diagnostics_dir = await diag.capture(
+                portal_page, f"no_fill_{result.job_id}"
+            )
 
     except DomainSkippedError as exc:
         logger.warning(f"Domain skipped for {result.apply_url}: {exc}")
@@ -603,7 +631,7 @@ async def _process_one_job(
             else:
                 _emit(emit, "log", level="info", message="Retrying step once after manual intervention...")
                 try:
-                    portal_page_retry, filled, portal_state = await autofill_portal_form(
+                    portal_page_retry, filled, portal_state, outcome = await autofill_portal_form(
                         context,
                         portal_page if portal_page else apply_url_to_use,
                         req.candidate,
@@ -615,9 +643,13 @@ async def _process_one_job(
                         portal_page = portal_page_retry
                     result.filled_fields = filled
                     result.portal_state = portal_state
-                    if filled > 0:
+                    if outcome == "confirmed":
                         result.status = JobStatus.APPLIED
-                        _emit(emit, "log", level="info", message=f"  ✓ Autofilled {filled} field(s) on portal after retry.")
+                        _emit(emit, "log", level="success", message=f"  ✓ Application submitted & confirmed after retry ({filled} field(s)).")
+                    elif outcome == "submitted_unconfirmed" or filled > 0:
+                        result.status = JobStatus.MANUAL_REVIEW
+                        result.error = "Submitted/filled after retry but not confirmed — please verify."
+                        _emit(emit, "log", level="warning", message=f"  ⚠ Retry filled {filled} field(s) but no confirmation – flagged for review.")
                     else:
                         result.status = JobStatus.FAILED
                         result.error = "No form fields could be filled on retry."

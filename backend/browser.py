@@ -35,6 +35,7 @@ try:
         MIN_DELAY,
         SESSION_PATH,
         USER_AGENT,
+        USE_PATCHRIGHT,
     )
 except ImportError:
     from config import (
@@ -45,18 +46,27 @@ except ImportError:
         MIN_DELAY,
         SESSION_PATH,
         USER_AGENT,
+        USE_PATCHRIGHT,
     )
 
 
 # ── Anti-detection JS injected into every page before scripts run ─────────────
 
-_STEALTH_JS = """
+# navigator/webdriver spoof — only injected when Patchright is NOT active
+# (Patchright patches these natively; double-spoofing re-introduces detectable
+# leaks). See config.USE_PATCHRIGHT.
+_WEBDRIVER_SPOOF_JS = """
 // Remove the most obvious automation markers
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
 Object.defineProperty(navigator, 'languages', { get: () => ['en-US','en'] });
 window.chrome = { runtime: {} };
+"""
 
+# Pause/resume UI widget — REQUIRED by the pause system
+# (window.showAntigravityPauseUI / hideAntigravityPauseUI / antigravityResumeBot).
+# Always injected regardless of stealth mode.
+_WIDGET_JS = """
 if (window === window.top) {
     window.addEventListener('DOMContentLoaded', () => {
         if (document.getElementById('antigravity-bot-widget')) return;
@@ -142,6 +152,9 @@ if (window === window.top) {
 }
 """
 
+# Full stealth script used when Patchright is NOT installed (spoof + widget).
+_STEALTH_JS = _WEBDRIVER_SPOOF_JS + _WIDGET_JS
+
 
 # ── Public helpers ────────────────────────────────────────────────────────────
 
@@ -205,11 +218,11 @@ async def build_context(
     """
     har_path = str(DIAGNOSTICS_DIR / "session.har") if record_har else ""
 
-    logger.info(f"Launching Chrome (headless={headless})")
+    logger.info(f"Launching Chrome (headless={headless}, patchright={USE_PATCHRIGHT})")
     try:
         browser = await playwright.chromium.launch(
             channel="chrome",
-            headless=False,
+            headless=headless,
             args=[
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
@@ -257,8 +270,9 @@ async def build_context(
     context = await browser.new_context(**context_kwargs)
     logger.info("Chromium browser context created.")
 
-    # Inject stealth JS into every page before any other script runs
-    await context.add_init_script(_STEALTH_JS)
+    # Inject the pause-widget always; add the navigator spoof only when Patchright
+    # is NOT active (Patchright patches those natively — double-patching leaks).
+    await context.add_init_script(_WIDGET_JS if USE_PATCHRIGHT else _STEALTH_JS)
 
     # Wire up console listener if a buffer was supplied
     if console_buf is not None:
@@ -293,9 +307,12 @@ def _attach_console(page: Page, buf: List[Dict[str, Any]]) -> None:
 
 async def new_stealth_page(context):
     page = await context.new_page()
-    try:
-        from playwright_stealth import stealth_async
-        await stealth_async(page)
-    except ImportError:
-        pass
+    # Patchright already applies stealth natively; stacking playwright_stealth on
+    # top re-introduces detectable inconsistencies, so skip it in that case.
+    if not USE_PATCHRIGHT:
+        try:
+            from playwright_stealth import stealth_async
+            await stealth_async(page)
+        except ImportError:
+            pass
     return page

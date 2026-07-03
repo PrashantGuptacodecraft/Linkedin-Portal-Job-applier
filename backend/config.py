@@ -175,6 +175,16 @@ HEADLESS: bool = os.getenv("HEADLESS", "false").lower() == "true"
 
 # ── Browser ───────────────────────────────────────────────────────────────────
 
+# Prefer Patchright (a patched, undetected Playwright fork) when installed.
+# It fixes the CDP `Runtime.enable` leak that plain Playwright emits — the main
+# signal modern Cloudflare/DataDome bot walls key on. When active we also skip
+# the hand-rolled navigator spoof + playwright_stealth to avoid double-patching.
+try:
+    import patchright  # noqa: F401
+    USE_PATCHRIGHT: bool = True
+except Exception:
+    USE_PATCHRIGHT = False
+
 def _detect_timezone() -> str:
     """Try to auto-detect the local IANA timezone, fallback to Asia/Kolkata."""
     try:

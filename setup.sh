@@ -55,6 +55,10 @@ python -m playwright install chromium
 python -m playwright install-deps chromium 2>/dev/null || true
 success "Playwright Chromium ready."
 
+# ── Patchright browser (undetected fork; best-effort) ─────────────────────────
+info "Installing Patchright Chromium (undetected)…"
+python -m patchright install chromium 2>/dev/null || warn "Patchright browser install skipped (uses system Chrome via channel='chrome')."
+
 # ── Environment file ──────────────────────────────────────────────────────────
 if [[ ! -f ".env" ]]; then
   cp .env.example .env

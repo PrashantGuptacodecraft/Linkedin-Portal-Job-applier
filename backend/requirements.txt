@@ -1,6 +1,10 @@
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
 playwright>=1.44.0
+# Patchright: patched, undetected Playwright fork. When installed the app uses it
+# automatically (see config.USE_PATCHRIGHT) to bypass Cloudflare/DataDome CDP-leak
+# detection. Falls back to plain playwright if absent.
+patchright>=1.44.0
 pydantic>=2.7.0
 pydantic-settings>=2.3.0
 python-dotenv>=1.0.1
