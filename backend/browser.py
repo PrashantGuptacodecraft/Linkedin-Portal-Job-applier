@@ -223,13 +223,16 @@ async def build_context(
         browser = await playwright.chromium.launch(
             channel="chrome",
             headless=headless,
+            # NOTE: do NOT add --disable-web-security or
+            # --disable-features=IsolateOrigins,site-per-process here. They break
+            # heavy SPAs (LinkedIn's JS bundle fails to hydrate → only the HTML
+            # shell renders, with net::ERR_INVALID_ARGUMENT resource errors).
+            # Playwright reads cross-origin ATS iframes natively via page.frames /
+            # frame.evaluate, so those flags are unnecessary as well as harmful.
             args=[
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--allow-running-insecure-content",
-                "--disable-web-security",
             ],
             ignore_default_args=["--enable-automation", "--no-sandbox"],
         )
@@ -237,23 +240,21 @@ async def build_context(
         logger.error(f"Chromium launch failed: {exc}")
         raise
 
+    # IMPORTANT: only set request-agnostic headers here. `extra_http_headers`
+    # is applied to EVERY request (documents, XHR, scripts, styles, images), so
+    # pinning per-request navigation headers — Sec-Fetch-Dest/Mode/Site,
+    # Accept: text/html, Upgrade-Insecure-Requests — corrupts subresource
+    # fetches and Chrome rejects them with net::ERR_INVALID_ARGUMENT, leaving
+    # SPAs like LinkedIn as an un-hydrated HTML shell. Let Chrome compute those
+    # per request; only override Accept-Language.
     context_kwargs: Dict[str, Any] = dict(
         user_agent=USER_AGENT,
         viewport={"width": 1440, "height": 900},
         locale="en-US",
         timezone_id=BROWSER_TIMEZONE,
         extra_http_headers={
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "sec-ch-ua": '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Upgrade-Insecure-Requests": "1"
-        }
+        },
     )
 
     if har_path:

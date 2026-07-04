@@ -247,7 +247,15 @@ def build_search_urls(keywords: str, filters: Optional[SearchFilters] = None) ->
 
 
 async def detect_access_challenge(page: Page) -> Optional[str]:
-    """Detect CAPTCHA / checkpoint / auth-wall states on LinkedIn or portals."""
+    """Detect CAPTCHA / checkpoint / auth-wall states on LinkedIn or portals.
+
+    IMPORTANT: only reliable signals are used. Earlier versions scanned the full
+    body text for substrings like "challenge", "register", "sign in" — but those
+    words appear on essentially every normal LinkedIn job page (job descriptions,
+    hidden nav markup), so they false-positived on real jobs, triggered a 20s
+    "recovery" wait, and skipped the job. We now key only on URL/title, a visible
+    CAPTCHA widget, or a login form on a page that has NO real job content.
+    """
     url = (page.url or "").lower()
     title = ""
     try:
@@ -255,22 +263,43 @@ async def detect_access_challenge(page: Page) -> Optional[str]:
     except Exception:
         pass
 
-    markers = ["captcha", "checkpoint", "challenge", "verify you are human", "security verification"]
-    if any(m in url or m in title for m in markers):
+    # 1. URL-based signals — LinkedIn redirects real walls to these paths.
+    url_login_markers = ["/authwall", "/uas/login", "/checkpoint/lg", "linkedin.com/login"]
+    url_captcha_markers = ["/checkpoint/challenge", "challengesv2", "captcha"]
+    if any(m in url for m in url_captcha_markers):
         return "captcha_required"
-
-    try:
-        body = (await page.text_content("body")) or ""
-        body = body.lower()
-    except Exception:
-        body = ""
-
-    if "create account" in body or "sign up" in body or "register" in body:
-        return "registration_required"
-    if "log in" in body or "sign in" in body or ("username" in body and "password" in body):
+    if any(m in url for m in url_login_markers):
         return "login_required"
-    if any(m in body for m in markers):
+
+    # 2. Title-based signals for interstitial challenge pages.
+    title_markers = ["security verification", "just a moment", "verify you are human", "are you a human"]
+    if any(m in title for m in title_markers):
         return "captcha_required"
+
+    # 3. A visible CAPTCHA widget is a strong, specific signal.
+    try:
+        widget = await page.query_selector(
+            "iframe[src*='captcha'], iframe[src*='recaptcha'], iframe[src*='hcaptcha'], "
+            "iframe[src*='challenges.cloudflare.com'], div.g-recaptcha, div.h-captcha, [data-sitekey]"
+        )
+        if widget and await widget.is_visible():
+            return "captcha_required"
+    except Exception:
+        pass
+
+    # 4. A visible password field on a page with NO job content = auth wall.
+    try:
+        pwd = await page.query_selector("input[type='password']")
+        if pwd and await pwd.is_visible():
+            has_job = await page.query_selector(
+                "button.jobs-apply-button, a.jobs-apply-button, "
+                ".job-details-jobs-unified-top-card__job-title, .jobs-description__content"
+            )
+            if not has_job:
+                return "login_required"
+    except Exception:
+        pass
+
     return None
 
 

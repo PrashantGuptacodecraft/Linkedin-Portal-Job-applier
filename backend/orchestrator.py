@@ -229,6 +229,8 @@ async def run_pipeline(
                         summary.applied += 1
                     elif result.status == JobStatus.SKIPPED:
                         summary.skipped += 1
+                    elif result.status == JobStatus.MANUAL_REVIEW:
+                        summary.needs_review += 1
                     else:
                         summary.failed  += 1
 
@@ -253,6 +255,8 @@ async def run_pipeline(
                         summary.applied += 1
                     elif result.status == JobStatus.SKIPPED:
                         summary.skipped += 1
+                    elif result.status == JobStatus.MANUAL_REVIEW:
+                        summary.needs_review += 1
                     else:
                         summary.failed += 1
                     emit_event({"type": "job_result", "job": result.model_dump(mode="json")})
@@ -284,8 +288,8 @@ async def run_pipeline(
         logger.error(f"Browser/Playwright error: {exc}\n{traceback.format_exc()}")
         emit_event({"type": "error", "message": f"Browser launch failed: {exc}"})
 
-    emit_event({"type": "log", "level": "info", "message": f"Done. Applied: {summary.applied} | Skipped: {summary.skipped} | Failed: {summary.failed}"})
-    emit_event({"type": "summary", "applied": summary.applied, "skipped": summary.skipped, "failed": summary.failed, "total": summary.total})
+    emit_event({"type": "log", "level": "info", "message": f"Done. Applied: {summary.applied} | Needs review: {summary.needs_review} | Skipped: {summary.skipped} | Failed: {summary.failed}"})
+    emit_event({"type": "summary", "applied": summary.applied, "needs_review": summary.needs_review, "skipped": summary.skipped, "failed": summary.failed, "total": summary.total})
     # Note: 'done' event is sent by the SSE generator in main.py via the None sentinel.
     # Do NOT emit it here to avoid duplicates.
     return summary
@@ -377,8 +381,14 @@ async def _collect_job_urls(
                 continue
             if res.apply_type == "external" and res.apply_url:
                 filtered.append(job_url)
+            elif res.apply_type == "easy_apply":
+                emit({"type": "log", "level": "info", "message": f"Skipping Easy Apply job (not handled): {job_url}"})
+            elif res.error in ("captcha_required", "login_required", "registration_required"):
+                emit({"type": "log", "level": "warning", "message": f"Skipping — LinkedIn wall ({res.error}) while inspecting: {job_url}"})
+            elif res.apply_type == "external" and not res.apply_url:
+                emit({"type": "log", "level": "warning", "message": f"External job but could not resolve portal URL: {job_url}"})
             else:
-                emit({"type": "log", "level": "info", "message": f"Skipping Easy Apply or non-external job: {job_url}"})
+                emit({"type": "log", "level": "info", "message": f"Skipping (no external apply / {res.apply_type or 'unknown'}): {job_url}"})
         finally:
             try:
                 await check_page.close()
@@ -549,6 +559,12 @@ async def _process_one_job(
             result.status = JobStatus.APPLIED
             _emit(emit, "log", level="success",
                   message=f"  ✓ Application submitted & confirmed ({filled} field(s) filled).")
+        elif outcome == "manual":
+            result.status = JobStatus.MANUAL_REVIEW
+            result.error = f"Autofilled {filled} field(s) but form needs manual completion/CAPTCHA — left open, NOT submitted."
+            _emit(emit, "log", level="warning",
+                  message=f"  ⚠ Form left open for manual completion ({filled} field(s) filled) — not submitted.")
+            result.diagnostics_dir = await diag.capture(portal_page, f"manual_needed_{result.job_id}")
         elif outcome == "submitted_unconfirmed":
             result.status = JobStatus.MANUAL_REVIEW
             result.error = "Submitted but confirmation not detected — please verify."
@@ -673,10 +689,16 @@ async def _process_one_job(
                     _emit(emit, "log", level="success", message=f"Application screenshot saved: {screenshot_path}")
                 except Exception:
                     pass
-            try:
-                await portal_page.close()
-            except Exception:
-                pass
+            # Keep the tab OPEN when the form was left for manual completion, so
+            # the user can finish + submit it themselves. All other outcomes close.
+            if result.status == JobStatus.MANUAL_REVIEW and "manual completion" in (result.error or ""):
+                _emit(emit, "log", level="warning",
+                      message="  → Leaving this browser tab OPEN so you can finish and submit the application manually.")
+            else:
+                try:
+                    await portal_page.close()
+                except Exception:
+                    pass
 
     return result
 

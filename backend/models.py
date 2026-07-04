@@ -119,6 +119,7 @@ class SessionSummary(BaseModel):
     applied:    int            = 0
     skipped:    int            = 0
     failed:     int            = 0
+    needs_review: int          = 0   # submitted/filled but not confirmed — manual verify
     search_url: Optional[str] = None
     search_urls: List[str] = Field(default_factory=list)
     filters:    SearchFilters = Field(default_factory=SearchFilters)

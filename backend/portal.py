@@ -267,6 +267,19 @@ async def autofill_portal_form(
         except ImportError:
             stealth_async = None
 
+    # Use the email the user supplied in the UI (Portal Email / Gmail) for form
+    # filling when the candidate profile email is blank. Without this the form's
+    # required "Email" field stays empty and the completeness gate blocks submit.
+    try:
+        if not (getattr(candidate, "email", "") or "").strip() and login_credentials is not None:
+            fallback_email = (getattr(login_credentials, "portal_email", None)
+                              or getattr(login_credentials, "gmail_address", None) or "")
+            if fallback_email:
+                candidate.email = fallback_email
+                logger.info(f"Candidate email blank — using provided email for form fill: {fallback_email}")
+    except Exception:
+        pass
+
     # Check SKIP_DOMAINS
     target_url = getattr(apply_target, 'url', str(apply_target))
     try:
@@ -392,24 +405,55 @@ async def autofill_portal_form(
     # NOTE: adapters no longer terminate the flow. They only pre-fill the
     # fields they know; the semantic layers and the AI submit loop ALWAYS run
     # afterwards so every portal gets classify → fill → submit → confirm.
+    # Match against the apply URL, the page URL, AND every iframe src — many
+    # ATSes (Greenhouse, Lever, Ashby, …) are embedded on a company careers
+    # page as a cross-origin iframe, so the ATS host only appears on the frame.
+    try:
+        page_url = page.url or ''
+    except Exception:
+        page_url = ''
+    match_target = None      # page or the matching Frame
+    matched_adapter = None
     for pattern, adapter in _PORTAL_ADAPTERS:
-        try:
-            page_url = page.url or ''
-        except Exception:
-            page_url = ''
         if pattern.search(str(apply_url or '')) or pattern.search(page_url):
-            logger.info(f"Pre-filling via portal adapter: {adapter.__name__}")
+            match_target, matched_adapter = page, adapter
+            break
+        for fr in page.frames:
             try:
-                filled += await adapter(page, candidate)
-            except Exception as exc:
-                logger.debug(f"Adapter {adapter.__name__} pre-fill error: {exc}")
+                furl = fr.url or ''
+            except Exception:
+                furl = ''
+            if furl and pattern.search(furl):
+                match_target, matched_adapter = fr, adapter
+                break
+        if matched_adapter:
             break
 
+    if matched_adapter:
+        where = "page" if match_target is page else "iframe"
+        logger.info(f"Pre-filling via portal adapter: {matched_adapter.__name__} (target: {where})")
+        if emit:
+            emit({"type": "log", "level": "info",
+                  "message": f"Detected {matched_adapter.__name__.strip('_')} portal ({where}) — applying specialized fill."})
+        try:
+            filled += await matched_adapter(match_target, candidate)
+        except Exception as exc:
+            logger.debug(f"Adapter {matched_adapter.__name__} pre-fill error: {exc}")
+
     # ── Layer 2: Semantic fill (reliable, no AI needed) ───────────────────
+    # Fill the top document AND every child frame — the real form is often in
+    # a cross-origin iframe that page.query_selector cannot see.
     logger.info("Running semantic fill layers...")
     if emit:
         emit({"type": "log", "level": "info", "message": "Running semantic form fill..."})
     semantic_filled = await _semantic_fill(page, candidate)
+    for fr in page.frames:
+        if fr is page.main_frame:
+            continue
+        try:
+            semantic_filled += await _semantic_fill(fr, candidate)
+        except Exception as exc:
+            logger.debug(f"Semantic fill (frame) error: {exc}")
     filled += semantic_filled
     logger.info(f"Semantic fill: {semantic_filled} field(s)")
 
@@ -1618,10 +1662,49 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
             # Upgrade 5: reCAPTCHA detection
             await _handle_recaptcha_before_submit(page, emit, session_id)
 
+            # ── Completeness gate: only auto-submit a FULLY-filled form ───────
+            # If any required field is still empty, or a CAPTCHA is present, DO
+            # NOT submit. Screenshot the current state, leave the page open, and
+            # hand control to the human to finish + submit manually.
+            remaining_required = await _required_fields_remaining(page)
+            captcha_present = await _has_active_captcha(page)
+            if remaining_required or captcha_present:
+                bits = []
+                if remaining_required:
+                    bits.append(f"{len(remaining_required)} required field(s) still empty: "
+                                + ", ".join(remaining_required[:6])
+                                + ("…" if len(remaining_required) > 6 else ""))
+                if captcha_present:
+                    bits.append("a CAPTCHA must be solved by a human")
+                reason = ("Form not fully complete — " + "; ".join(bits)
+                          + ". NOT submitting. Please finish the form and submit it "
+                          "manually in this browser window, then click Resume.")
+                logger.info(f"Completeness gate blocked auto-submit: {reason}")
+                if emit:
+                    emit({"type": "log", "level": "warning", "message": reason})
+                try:
+                    import os
+                    os.makedirs("screenshots", exist_ok=True)
+                    ss = f"screenshots/manual_needed_{session_id}_{int(time.time())}.png"
+                    await page.screenshot(path=ss, full_page=True)
+                    if emit:
+                        emit({"type": "log", "level": "info", "message": f"Screenshot saved (form left open for manual completion): {ss}"})
+                except Exception:
+                    pass
+                outcome = "manual"
+                # Block here: keeps the browser open and waits for the human to
+                # finish + submit, then click Resume.
+                await pause_checkpoint(session_id, emit, reason, page=page)
+                # After resume, detect whether the human actually submitted it.
+                status = await _post_submit_confirmation(page, emit)
+                if status == "CONFIRMED":
+                    outcome = "confirmed"
+                break
+
             # Try to click next/continue/submit
             # Auto-submit without pausing — only pause on actual errors
             if emit:
-                emit({"type": "log", "level": "info", "message": "Clicking Next/Submit..."})
+                emit({"type": "log", "level": "info", "message": "All required fields filled — clicking Next/Submit..."})
             url_before = page.url
             clicked = await click_next_or_submit(page)
             if not clicked:
@@ -1854,6 +1937,90 @@ async def _collect_validation_errors(page: Page) -> List[str]:
     return uniq
 
 
+_REQUIRED_REMAINING_JS = r"""() => {
+    const out = [];
+    const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+    function labelFor(el) {
+        if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');
+        const lb = el.getAttribute('aria-labelledby');
+        if (lb) { const e = document.getElementById(lb.split(/\s+/)[0]); if (e) return e.innerText; }
+        if (el.id) { try { const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) return l.innerText; } catch (e) {} }
+        const w = el.closest('label'); if (w) return w.innerText;
+        const fs = el.closest('.field, .form-group, [class*="field"]');
+        if (fs) { const l = fs.querySelector('label'); if (l) return l.innerText; }
+        return el.name || el.placeholder || '';
+    }
+    const seenGroup = new Set();
+    for (const el of document.querySelectorAll('input, select, textarea')) {
+        const t = (el.type || el.tagName).toLowerCase();
+        if (['hidden', 'submit', 'button', 'reset', 'image', 'search'].includes(t)) continue;
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        if (el.offsetParent === null && t !== 'file') continue;
+        const lbl = norm(labelFor(el));
+        const required = el.hasAttribute('required') || el.getAttribute('aria-required') === 'true' || /\*/.test(lbl);
+        if (!required) continue;
+        if (t === 'radio' || t === 'checkbox') {
+            const key = el.name || lbl;
+            if (seenGroup.has(key)) continue; seenGroup.add(key);
+            let anyChecked = false;
+            if (el.name) { for (const r of document.querySelectorAll('input[name="' + CSS.escape(el.name) + '"]')) if (r.checked) anyChecked = true; }
+            else anyChecked = el.checked;
+            if (!anyChecked) out.push(lbl || key || '(checkbox)');
+        } else if (el.tagName.toLowerCase() === 'select') {
+            if (!el.value || el.value === '') out.push(lbl || '(dropdown)');
+        } else if (t === 'file') {
+            // file inputs: treat as satisfied if any file chosen; otherwise flag only when clearly required
+            if (!(el.files && el.files.length) && /resume|cv|required/i.test(lbl)) out.push(lbl || '(file)');
+        } else {
+            if (!norm(el.value)) out.push(lbl || '(text)');
+        }
+    }
+    return out.filter(Boolean).slice(0, 40);
+}"""
+
+
+async def _required_fields_remaining(page: Page) -> List[str]:
+    """Return labels of visible REQUIRED fields that are still empty, across ALL
+    frames (Greenhouse and many ATSes render the form in a cross-origin iframe).
+    Errs toward reporting a field as incomplete — a false 'incomplete' just means
+    we pause for a human, which is the safe default."""
+    remaining: List[str] = []
+    for fr in page.frames:
+        try:
+            r = await fr.evaluate(_REQUIRED_REMAINING_JS)
+            if r:
+                remaining.extend(r)
+        except Exception:
+            pass
+    seen, uniq = set(), []
+    for x in remaining:
+        k = _norm(x)
+        if k and k not in seen:
+            seen.add(k)
+            uniq.append(x)
+    return uniq
+
+
+async def _has_active_captcha(page: Page) -> bool:
+    """True if any frame is a reCAPTCHA / hCaptcha / Turnstile challenge, or a
+    captcha widget is present. These require a human, so we must not auto-submit."""
+    for fr in page.frames:
+        u = (fr.url or "").lower()
+        if any(k in u for k in ("recaptcha", "hcaptcha", "challenges.cloudflare", "turnstile", "captcha")):
+            return True
+    try:
+        w = await page.query_selector(
+            ".g-recaptcha, .h-captcha, [data-sitekey], iframe[src*='recaptcha'], "
+            "iframe[src*='hcaptcha'], iframe[src*='turnstile']"
+        )
+        if w:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 async def _pre_submit_validation(page: Page, candidate: CandidateProfile, client: Any, emit: Optional[Any], session_id: str = "default") -> int:
     """Pre-submit sweep: re-map the form with the robust engine to fill any
     required/empty fields (including radios, checkboxes and custom dropdowns)
@@ -1939,6 +2106,25 @@ async def _post_submit_confirmation(page: Page, emit: Optional[Any]) -> str:
         return "SUBMITTED_UNCONFIRMED"
 
 
+# Counts visible form controls in ONE frame/document. Run per-frame and summed
+# by _heuristic_classify_page so iframe-embedded forms are counted too.
+_FORM_STATS_JS = """() => {
+    const stats = {text:0, email:0, tel:0, file:0, password:0,
+                   select:0, textarea:0, checkbox:0, radio:0};
+    const inputs = document.querySelectorAll('input, select, textarea');
+    for (const el of inputs) {
+        if (el.offsetParent === null && el.type !== 'file') continue;
+        const t = (el.type || el.tagName).toLowerCase();
+        if (t === 'hidden' || t === 'submit' || t === 'button') continue;
+        if (t in stats) stats[t]++;
+        else if (t === 'text' || !el.type) stats.text++;
+    }
+    stats.select = document.querySelectorAll('select').length;
+    stats.textarea = document.querySelectorAll('textarea').length;
+    return stats;
+}"""
+
+
 async def _heuristic_classify_page(page: Page) -> Tuple[str, str]:
     """Classify the page using DOM inspection only — no AI required.
     Returns (page_type, reasoning). Falls back to UNKNOWN if unsure."""
@@ -1975,7 +2161,12 @@ async def _heuristic_classify_page(page: Page) -> Tuple[str, str]:
         if any(phrase in body_text for phrase in confirmation_phrases):
             return "CONFIRMATION", f"Page contains confirmation phrase"
 
-        # ── CAPTCHA detection ─────────────────────────────────────────────
+        # ── CAPTCHA widget presence (deferred verdict) ────────────────────
+        # A visible reCAPTCHA/hCaptcha widget appears on MOST application forms
+        # as anti-spam. It must NOT by itself mean "CAPTCHA page" — otherwise the
+        # form never gets filled. Record presence; only classify as CAPTCHA below
+        # when there is NO real form. Submit-time handling deals with the captcha.
+        captcha_widget_present = False
         try:
             captcha_els = await page.query_selector_all(
                 "iframe[src*='captcha'], iframe[src*='recaptcha'], iframe[src*='hcaptcha'], "
@@ -1985,7 +2176,8 @@ async def _heuristic_classify_page(page: Page) -> Tuple[str, str]:
             for el in captcha_els:
                 try:
                     if await el.is_visible():
-                        return "CAPTCHA", "Visible CAPTCHA widget detected"
+                        captcha_widget_present = True
+                        break
                 except Exception:
                     continue
         except Exception:
@@ -1999,37 +2191,24 @@ async def _heuristic_classify_page(page: Page) -> Tuple[str, str]:
         if "just a moment" in title or "verifying you are human" in title:
             return "CAPTCHA", "Cloudflare challenge page title detected"
 
-        # ── Count visible form elements ───────────────────────────────────
+        # ── Count visible form elements across ALL frames ─────────────────
+        # The real application form is often inside a cross-origin iframe
+        # (Greenhouse, Lever, Ashby, …). Counting only the top document made
+        # those pages look empty and get misclassified as LOGIN_PAGE.
         form_stats = {"text": 0, "email": 0, "tel": 0, "file": 0, "password": 0,
                       "select": 0, "textarea": 0, "checkbox": 0, "radio": 0}
-        try:
-            form_stats = await page.evaluate("""() => {
-                const stats = {text:0, email:0, tel:0, file:0, password:0,
-                               select:0, textarea:0, checkbox:0, radio:0};
-                const inputs = document.querySelectorAll('input, select, textarea');
-                for (const el of inputs) {
-                    if (el.offsetParent === null && el.type !== 'file') continue;
-                    const t = (el.type || el.tagName).toLowerCase();
-                    if (t === 'hidden' || t === 'submit' || t === 'button') continue;
-                    if (t in stats) stats[t]++;
-                    else if (t === 'text' || !el.type) stats.text++;
-                }
-                stats.select = document.querySelectorAll('select').length;
-                stats.textarea = document.querySelectorAll('textarea').length;
-                return stats;
-            }""")
-        except Exception:
-            pass
+        for fr in page.frames:
+            try:
+                fs = await fr.evaluate(_FORM_STATS_JS)
+                for k in form_stats:
+                    form_stats[k] += int(fs.get(k, 0) or 0)
+            except Exception:
+                pass
 
         total_inputs = sum(form_stats.get(k, 0) for k in ["text", "email", "tel", "textarea", "select"])
         has_password = form_stats.get("password", 0) > 0
         has_file = form_stats.get("file", 0) > 0
 
-        # ── LOGIN page ────────────────────────────────────────────────────
-        if has_password and total_inputs <= 2:
-            return "LOGIN_PAGE", f"Password field with {total_inputs} other inputs — login form"
-
-        # Multi-step login detection (e.g. Dice, Workday — show email first, then password)
         login_url_markers = ["login", "signin", "sign-in", "sso", "auth", "account/access"]
         is_login_url = any(m in url for m in login_url_markers)
         has_email_input = form_stats.get("email", 0) > 0
@@ -2037,12 +2216,30 @@ async def _heuristic_classify_page(page: Page) -> Tuple[str, str]:
                               "username", "continue with email", "welcome back"]
         has_login_text = any(m in body_text for m in login_text_markers)
 
-        if (total_inputs <= 1 or has_email_input) and (is_login_url or has_login_text):
+        # ── APPLICATION_FORM wins first when a real form is present ────────
+        # A resume/file upload or several inputs (and NO password field) is an
+        # application form, NOT a login page — even when the page also shows
+        # "sign in" text (e.g. an optional "Sign in to autofill" button).
+        if (has_file or total_inputs >= 3) and not has_password:
+            return "APPLICATION_FORM", f"Found {total_inputs} form inputs + {form_stats.get('file',0)} file input(s)"
+
+        # ── LOGIN page ────────────────────────────────────────────────────
+        if has_password and total_inputs <= 3:
+            return "LOGIN_PAGE", f"Password field with {total_inputs} other inputs — login form"
+
+        # Multi-step login (email-only first step): require FEW inputs so a full
+        # application form that merely contains an email field is not mistaken
+        # for a login page.
+        if total_inputs <= 2 and (is_login_url or has_login_text):
             return "LOGIN_PAGE", f"Multi-step login detected (URL: {is_login_url}, text: {has_login_text}, inputs: {total_inputs})"
 
-        # ── APPLICATION_FORM detection ────────────────────────────────────
+        # ── APPLICATION_FORM detection (fallback threshold) ───────────────
         if total_inputs >= 2 or has_file:
             return "APPLICATION_FORM", f"Found {total_inputs} form inputs + {form_stats.get('file',0)} file inputs"
+
+        # ── CAPTCHA wall (only when there is NO usable form) ──────────────
+        if captcha_widget_present:
+            return "CAPTCHA", "Visible CAPTCHA widget and no application form present"
 
         # ── JOB_DESCRIPTION detection ─────────────────────────────────────
         apply_btn_count = 0

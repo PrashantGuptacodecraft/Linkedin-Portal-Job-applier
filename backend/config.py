@@ -158,11 +158,11 @@ def get_portal_credentials(url: str, request_creds: Optional[Any] = None, for_re
         import logging
         logging.getLogger(__name__).warning(f"Failed to log portal account: {e}")
 
-    if for_registration:
-        return {"email": email, "password": generated_pw, "generated_password": generated_pw}
-    else:
-        # LOGIN: use actual password
-        return {"email": email, "password": raw_password, "generated_password": generated_pw}
+    # Use the user's ACTUAL password for BOTH login and registration. Creating an
+    # account with a generated password meant a later visit (which shows a LOGIN
+    # page) would try the user's real password and fail → login_required → skip.
+    # Keeping one password the user controls makes register→login consistent.
+    return {"email": email, "password": raw_password, "generated_password": generated_pw}
 
 # ── Timing / safety ───────────────────────────────────────────────────────────
 
