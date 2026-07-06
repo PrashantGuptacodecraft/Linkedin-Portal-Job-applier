@@ -250,7 +250,7 @@ def build_resume_html(candidate: CandidateProfile) -> str:
     else:
         project_blocks = role_projects  # type: ignore[assignment]
 
-    name = html.escape(candidate.name or "Prashant Gupta")
+    name = html.escape(candidate.first_name + " " + candidate.last_name if candidate.first_name else "Candidate Name")
     email = html.escape(candidate.email or "")
     phone = html.escape(candidate.phone or "")
     location = html.escape(candidate.location or "")
@@ -356,7 +356,7 @@ def _draw_overlay_pdf(candidate: CandidateProfile) -> bytes:
     role_key = normalize_role(candidate.target_role)
     template = ROLE_TEMPLATES.get(role_key, ROLE_TEMPLATES["java developer + c2c"])
 
-    name = candidate.name or "Prashant Gupta"
+    name = (candidate.first_name + " " + candidate.last_name).strip() if candidate.first_name else "Candidate Name"
     headline = (candidate.target_role or str(template["headline"])).upper()
     email = candidate.email or ""
     phone = candidate.phone or ""

@@ -573,7 +573,7 @@ async def _process_one_job(
             result.diagnostics_dir = await diag.capture(
                 portal_page, f"unconfirmed_{result.job_id}"
             )
-        elif portal_state == "registration_required" or outcome == "blocked" and result.needs_registration:
+        elif (portal_state == "registration_required") or (outcome == "blocked" and result.needs_registration):
             result.status = JobStatus.SKIPPED
             result.error = "Portal registration required"
             _emit(emit, "log", level="warning", message="  ⚠ Registration detected on portal – manual step required.")

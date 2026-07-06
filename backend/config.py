@@ -37,27 +37,60 @@ GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 
 # Gemini model used for all form-filling / classification calls.
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+# NOTE: gemini-2.0-flash / -lite no longer have free-tier quota (return 429
+# "exceeded your current quota"). gemini-2.5-flash DOES, so it is the default.
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Multiple API keys: comma-separated in .env (e.g. "key1,key2,key3").
 # When one key hits its quota the engine rotates to the next automatically.
 GEMINI_API_KEYS: list = [k.strip() for k in GEMINI_API_KEY.split(",") if k.strip()]
 CURRENT_GEMINI_INDEX: int = 0
 
+# Per-key cooldown: index -> epoch seconds until the key is usable again. A key
+# that returns 429 is parked here so rotation skips it instead of hammering it.
+import time as _time
+_KEY_COOLDOWN_UNTIL: Dict[int, float] = {}
+
 def get_current_gemini_key() -> str:
-    global CURRENT_GEMINI_INDEX
     if not GEMINI_API_KEYS:
         return ""
     return GEMINI_API_KEYS[CURRENT_GEMINI_INDEX % len(GEMINI_API_KEYS)]
 
-def rotate_gemini_key() -> str:
-    global CURRENT_GEMINI_INDEX
+def mark_gemini_key_rate_limited(seconds: float = 60.0, index: Optional[int] = None) -> None:
+    """Park a key on cooldown so rotation skips it for *seconds*."""
     if not GEMINI_API_KEYS:
+        return
+    i = (CURRENT_GEMINI_INDEX if index is None else index) % len(GEMINI_API_KEYS)
+    _KEY_COOLDOWN_UNTIL[i] = _time.time() + max(1.0, seconds)
+
+def rotate_gemini_key() -> str:
+    """Circular rotation to the next key NOT in cooldown. If every key is cooling
+    down, pick the one whose cooldown expires soonest."""
+    global CURRENT_GEMINI_INDEX
+    n = len(GEMINI_API_KEYS)
+    if n == 0:
         return ""
-    CURRENT_GEMINI_INDEX = (CURRENT_GEMINI_INDEX + 1) % len(GEMINI_API_KEYS)
-    import logging
-    logging.getLogger(__name__).info(f"Rotated Gemini API Key to index {CURRENT_GEMINI_INDEX} (starts with {GEMINI_API_KEYS[CURRENT_GEMINI_INDEX][:8]}...)")
-    return GEMINI_API_KEYS[CURRENT_GEMINI_INDEX]
+    now = _time.time()
+    for step in range(1, n + 1):
+        idx = (CURRENT_GEMINI_INDEX + step) % n
+        if _KEY_COOLDOWN_UNTIL.get(idx, 0) <= now:
+            CURRENT_GEMINI_INDEX = idx
+            import logging
+            logging.getLogger(__name__).info(f"Rotated Gemini key -> index {idx} ({GEMINI_API_KEYS[idx][:10]}…)")
+            return GEMINI_API_KEYS[idx]
+    # All keys cooling down — advance to the soonest-available one.
+    idx = min(range(n), key=lambda i: _KEY_COOLDOWN_UNTIL.get(i, 0))
+    CURRENT_GEMINI_INDEX = idx
+    return GEMINI_API_KEYS[idx]
+
+def gemini_cooldown_remaining() -> float:
+    """Seconds until at least one key is usable (0 if one is available now)."""
+    n = len(GEMINI_API_KEYS)
+    if n == 0:
+        return 0.0
+    now = _time.time()
+    soonest = min(_KEY_COOLDOWN_UNTIL.get(i, 0) for i in range(n))
+    return max(0.0, soonest - now)
 
 # ── Portal Settings ───────────────────────────────────────────────────────────
 
@@ -204,5 +237,5 @@ USER_AGENT: str = os.getenv(
     "USER_AGENT",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36",
+    "Chrome/130.0.0.0 Safari/537.36",
 )

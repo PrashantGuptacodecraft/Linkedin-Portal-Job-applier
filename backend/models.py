@@ -21,12 +21,32 @@ class JobStatus(str, Enum):
     MANUAL_REVIEW = "manual_review"
 
 
+# ── Sub-Models ────────────────────────────────────────────────────────────────
+
+class Education(BaseModel):
+    degree: str = ""
+    field_of_study: str = ""
+    university: str = ""
+    graduation_year: str = ""
+    gpa: str = ""
+
+class WorkExperience(BaseModel):
+    company: str = ""
+    title: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    description: str = ""
+    is_current: bool = False
+
 # ── Candidate ─────────────────────────────────────────────────────────────────
 
 class CandidateProfile(BaseModel):
-    name:         str            = ""
+    name:         str            = "" # Kept for backward compatibility, but prefer first_name/last_name
+    first_name:   str            = ""
+    last_name:    str            = ""
     email:        str            = ""
     phone:        str            = ""
+    phone_country_code: str      = ""
     cover_text:   str            = ""
     resume_path:  Optional[str]  = None   # server-side path set after upload
     resume_mode:  str            = "upload"   # upload | generate
@@ -34,26 +54,42 @@ class CandidateProfile(BaseModel):
     ai_tailor_email: bool        = True
     ai_tailor_resume_pdf: bool   = True
     target_role:  str            = ""
+    current_job_title: str       = ""
     technical_skills: str        = ""
     projects:     str            = ""
     location:     Optional[str]  = None   # e.g. "Meerut, India"
+    
+    # Structured Address
+    street_address: str          = ""
+    city:           str          = ""
+    state:          str          = ""
+    country:        str          = ""
+    zip_code:       str          = ""
+    
     linkedin_url: Optional[str]  = None
+    portfolio_url: Optional[str] = "https://www.linkedin.com/in/prashant-gupta-923885328/"
+
+    # Structured Education & Experience
+    education: List[Education] = Field(default_factory=list)
+    work_experience: List[WorkExperience] = Field(default_factory=list)
 
     # Extended Profile
-    us_citizen: str = "Yes"
-    visa_sponsorship_required: str = "No"
-    security_clearance: str = "No"
+    us_citizen: str = ""
+    visa_sponsorship_required: str = ""
+    security_clearance: str = ""
     clearance_type: str = ""
     clearance_date: str = ""
     preferred_location: str = ""
     willing_to_relocate: str = "No"
-    work_authorization: str = "Authorized to work in the US"
+    work_authorization: str = ""
     gender: str = ""
     ethnicity: str = ""
-    veteran_status: str = "I am not a veteran"
-    disability_status: str = "I do not have a disability"
-    salary_expectation: str = ""
+    veteran_status: str = ""
+    disability_status: str = ""
+    salary_expectation: str = "50K"
     notice_period: str = "2 weeks"
+    availability_date: str = ""
+    referral_source: str = ""
     years_of_experience: str = ""
     custom_answers_text: str = ""
 

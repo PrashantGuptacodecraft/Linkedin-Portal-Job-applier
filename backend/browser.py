@@ -58,7 +58,11 @@ except ImportError:
 _WEBDRIVER_SPOOF_JS = """
 // Remove the most obvious automation markers
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
+Object.defineProperty(navigator, 'plugins',   { get: () => [
+    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    { name: 'Chrome PDF Viewer', filename: 'mhjimiigfkceipb', description: '' },
+    { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+] });
 Object.defineProperty(navigator, 'languages', { get: () => ['en-US','en'] });
 window.chrome = { runtime: {} };
 """

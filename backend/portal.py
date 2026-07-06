@@ -25,18 +25,20 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-async def _call_gemini_with_retry(client, prompt: str, retries: int = 4) -> Any:
-    """Call Gemini, rotating through every configured API key on quota/rate-limit
-    (429) before falling back to a timed wait. Also retries transient 503s.
+async def _call_gemini_with_retry(client, prompt: str, retries: int = 6) -> Any:
+    """Call Gemini with circular key rotation. On 429/quota the current key is
+    parked on cooldown and we shift to the next available key IMMEDIATELY (no
+    wait). We only sleep when EVERY key is cooling down — and then only until the
+    soonest one frees up. Transient 503s get a short backoff.
 
     Add more keys by setting GEMINI_API_KEY to a comma-separated list in .env."""
-    from .config import rotate_gemini_key, get_current_gemini_key, GEMINI_API_KEYS, GEMINI_MODEL
+    from .config import (rotate_gemini_key, get_current_gemini_key,
+                         mark_gemini_key_rate_limited, gemini_cooldown_remaining,
+                         GEMINI_API_KEYS, GEMINI_MODEL)
     import google.generativeai as genai
 
     n_keys = max(1, len(GEMINI_API_KEYS))
-    # Enough attempts to try every key at least once, plus a couple of timed waits.
-    max_attempts = max(retries, n_keys + 2)
-    keys_tried_this_round = 1  # the current key counts as already tried
+    max_attempts = max(retries, n_keys + 3)
 
     for attempt in range(max_attempts):
         try:
@@ -55,37 +57,33 @@ async def _call_gemini_with_retry(client, prompt: str, retries: int = 4) -> Any:
                         or "rate limit" in err_low or "resource_exhausted" in err_low)
             is_overload = ("503" in err_str or "overloaded" in err_low or "unavailable" in err_low)
 
-            # Rotate to the next key and retry immediately while keys remain untried.
-            if is_quota and n_keys > 1 and keys_tried_this_round < n_keys:
+            if is_quota:
+                # Park this key; honour a server-suggested retry delay if given.
+                cooldown = 60.0
+                m = re.search(r"retry in ([0-9.]+)s", err_str)
+                if m:
+                    cooldown = float(m.group(1)) + 1.0
+                mark_gemini_key_rate_limited(cooldown)
                 new_key = rotate_gemini_key()
-                keys_tried_this_round += 1
-                logger.warning(
-                    f"Gemini quota hit — rotating to key {new_key[:8]}… "
-                    f"({keys_tried_this_round}/{n_keys}) and retrying immediately."
-                )
+                wait = gemini_cooldown_remaining()
+                if wait > 0 and n_keys > 1:
+                    # Every key is cooling down — wait only until one frees up.
+                    wait = min(wait, 30.0)
+                    logger.warning(f"All {n_keys} Gemini keys rate-limited — waiting {wait:.0f}s for the next free key.")
+                    await asyncio.sleep(wait)
+                else:
+                    logger.warning(f"Gemini quota on current key — shifted to {new_key[:10]}… and retrying immediately.")
                 try:
-                    genai.configure(api_key=new_key)
+                    genai.configure(api_key=get_current_gemini_key())
                     client = genai.GenerativeModel(GEMINI_MODEL)
                 except Exception:
                     pass
                 continue
 
-            # All keys exhausted this round (or single key / transient error): wait.
-            wait_time = 5.0
-            if is_quota:
-                wait_time = 40.0
-                m = re.search(r"retry in ([0-9.]+)s", err_str)
-                if m:
-                    wait_time = float(m.group(1)) + 1.0
-            elif is_overload:
-                wait_time = 10.0
-            logger.warning(
-                f"Gemini error: {err_str[:100]}… waiting {wait_time:.1f}s "
-                f"(attempt {attempt + 1}/{max_attempts})."
-            )
+            # Transient (503/overloaded) — short backoff, keep the same key.
+            wait_time = 8.0 if is_overload else 4.0
+            logger.warning(f"Gemini error: {err_str[:90]}… waiting {wait_time:.0f}s (attempt {attempt + 1}/{max_attempts}).")
             await asyncio.sleep(wait_time)
-            # Start a fresh rotation round from the current key after waiting.
-            keys_tried_this_round = 1
             try:
                 genai.configure(api_key=get_current_gemini_key())
                 client = genai.GenerativeModel(GEMINI_MODEL)
@@ -248,6 +246,7 @@ async def autofill_portal_form(
     login_credentials: Optional[Any] = None,
     emit: Optional[Any] = None,
     session_id: str = "default",
+    job_description: Optional[str] = None,
 ) -> Tuple[Page, int, Optional[str], str]:
     """
     Open *apply_target* (URL or Page), autofill the application form, and
@@ -375,6 +374,14 @@ async def autofill_portal_form(
     except Exception as exc:
         logger.warning(f"Portal page load failed after retries for {getattr(page,'url', str(apply_target))}: {exc}")
 
+    # Accept cookie-consent popups first so they don't overlay the form / block clicks.
+    try:
+        if await _accept_cookie_banner(page):
+            if emit:
+                emit({"type": "log", "level": "info", "message": "Accepted cookie consent popup."})
+    except Exception as exc:
+        logger.debug(f"Cookie accept error: {exc}")
+
     portal_state = await detect_portal_state(page)
     if portal_state:
         logger.info(f"Portal state detected: {portal_state}")
@@ -388,6 +395,9 @@ async def autofill_portal_form(
     except Exception:
         pass
 
+    # Reveal the application form: click an "Application" tab or "Apply" button
+    # (Ashby/Lever/Greenhouse job pages show Overview | Application, or an
+    # "Apply for this Job" button that expands the form).
     filled += await _discover_and_click_apply(page)
 
     # ── Layer 0: Resume-first upload ──────────────────────────────────────
@@ -488,7 +498,7 @@ async def autofill_portal_form(
     if emit:
         emit({"type": "log", "level": "info", "message": "Initializing AI-powered application flow to finish remaining fields and submit..."})
     try:
-        ai_filled, outcome = await _ai_fallback_handler(page, candidate, login_credentials, emit, session_id)
+        ai_filled, outcome = await _ai_fallback_handler(page, candidate, login_credentials, emit, session_id, job_description)
         filled += ai_filled
     except Exception as exc:
         logger.error(f"AI fallback handler crashed: {exc}")
@@ -498,17 +508,76 @@ async def autofill_portal_form(
     logger.info(f"Portal autofill complete – {filled} field(s) filled (outcome: {outcome}).")
     return page, filled, portal_state, outcome
 
+async def _accept_cookie_banner(page) -> bool:
+    """Accept common cookie-consent popups (OneTrust, Cookiebot, HubSpot, generic)
+    so they don't overlay the form or intercept clicks. Scans the top document and
+    child frames. Only clicks ACCEPT-style buttons — never reject/manage/settings.
+    Returns True if a banner was accepted."""
+    id_selectors = [
+        "#onetrust-accept-btn-handler",
+        "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+        "#CybotCookiebotDialogBodyButtonAccept",
+        "button#hs-eu-confirmation-button",
+        "button[data-testid='uc-accept-all-button']",
+        ".cc-allow", ".cookie-accept", ".js-accept-cookies",
+        "[aria-label*='accept all' i]", "[aria-label*='accept cookies' i]",
+    ]
+    accept_texts = ["accept all", "accept all cookies", "allow all", "allow all cookies",
+                    "accept cookies", "accept", "i accept", "agree", "i agree",
+                    "got it", "allow cookies", "understood", "ok"]
+    bad_words = ("reject", "manage", "settings", "decline", "preferences",
+                 "customize", "customise", "necessary only", "options", "more")
+    scopes = [page] + [f for f in page.frames if f is not page.main_frame]
+    for scope in scopes:
+        for sel in id_selectors:
+            try:
+                el = await scope.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click(timeout=3000)
+                    await human_delay(0.5, 1.0)
+                    logger.info(f"Accepted cookie banner via selector {sel!r}")
+                    return True
+            except Exception:
+                continue
+        try:
+            btns = await scope.query_selector_all("button, a[role='button'], [role='button'], input[type='button']")
+        except Exception:
+            btns = []
+        for b in btns[:80]:
+            try:
+                if not await b.is_visible():
+                    continue
+                t = ((await b.inner_text()) or "").strip().lower()
+                if not t or len(t) > 30 or any(bad in t for bad in bad_words):
+                    continue
+                if any(t == v or (v in t and len(t) <= len(v) + 8) for v in accept_texts):
+                    await b.click(timeout=3000)
+                    await human_delay(0.5, 1.0)
+                    logger.info(f"Accepted cookie banner via text {t!r}")
+                    return True
+            except Exception:
+                continue
+    return False
+
+
 async def _discover_and_click_apply(page) -> int:
-    """Look for 'Apply', 'Apply Now' buttons and click them to open the form.
-    IMPORTANT: Do NOT click 'Submit', 'Send application', or form submit buttons."""
-    # Only look for buttons that OPEN the application form, not submit it
+    """Look for 'Apply', 'Apply Now', or an 'Application' tab and click to open the
+    form. IMPORTANT: Do NOT click 'Submit', 'Send application', or form submit buttons."""
+    # Only look for buttons/tabs that OPEN the application form, not submit it.
+    # "Application" tab first — Ashby/Lever job pages show Overview | Application.
     apply_selectors = [
+        "[role='tab']:has-text('Application')",
+        "[role='tab']:has-text('Apply')",
         "button:has-text('Apply Now')",
         "a:has-text('Apply Now')",
+        "button:has-text('Apply for this Job')",
+        "a:has-text('Apply for this Job')",
         "button:has-text('Apply for this job')",
         "a:has-text('Apply for this job')",
         "button:has-text('Start Application')",
         "a:has-text('Start Application')",
+        "button:has-text('Application')",
+        "a:has-text('Application')",
         "[data-automation-id='applyButton']",
         "button.apply-button",
         "a.apply-button",
@@ -715,40 +784,43 @@ def _profile_as_field_map(c: CandidateProfile) -> Dict[str, str]:
     Keys are deliberately broad so they match many real label/name variations.
     """
     name_parts = c.name.strip().split(" ", 1)
-    location_parts = (c.location or "").split(",")
-    city = location_parts[0].strip() if location_parts else ""
-    state_country = location_parts[1].strip() if len(location_parts) > 1 else ""
-
+    first_name = c.first_name or (name_parts[0] if name_parts else "")
+    last_name = c.last_name or (name_parts[1] if len(name_parts) > 1 else "")
+    
+    city = c.city or (c.location or "").split(",")[0].strip()
+    state = c.state or ((c.location or "").split(",")[1].strip() if "," in (c.location or "") else "")
+    country = c.country or state
+    
     return {
         # full name variants
-        "full name":    c.name,
-        "full_name":    c.name,
-        "name":         c.name,
-        "candidate name": c.name,
-        "applicant name": c.name,
-        # first / last name (including Ant Design dot-notation IDs)
-        "first name":   name_parts[0],
-        "first_name":   name_parts[0],
-        "firstname":    name_parts[0],
-        "given name":   name_parts[0],
-        "given_name":   name_parts[0],
-        "name first name": name_parts[0],    # matches "name.first_name" after normalization
-        "name first":   name_parts[0],
-        "last name":    name_parts[1] if len(name_parts) > 1 else "",
-        "last_name":    name_parts[1] if len(name_parts) > 1 else "",
-        "lastname":     name_parts[1] if len(name_parts) > 1 else "",
-        "surname":      name_parts[1] if len(name_parts) > 1 else "",
-        "family name":  name_parts[1] if len(name_parts) > 1 else "",
-        "family_name":  name_parts[1] if len(name_parts) > 1 else "",
-        "name last name": name_parts[1] if len(name_parts) > 1 else "",  # matches "name.last_name"
-        "name last":    name_parts[1] if len(name_parts) > 1 else "",
+        "full name":    c.name or f"{first_name} {last_name}".strip(),
+        "full_name":    c.name or f"{first_name} {last_name}".strip(),
+        "name":         c.name or f"{first_name} {last_name}".strip(),
+        "candidate name": c.name or f"{first_name} {last_name}".strip(),
+        "applicant name": c.name or f"{first_name} {last_name}".strip(),
+        # first / last name
+        "first name":   first_name,
+        "first_name":   first_name,
+        "firstname":    first_name,
+        "given name":   first_name,
+        "given_name":   first_name,
+        "name first name": first_name,
+        "name first":   first_name,
+        "last name":    last_name,
+        "last_name":    last_name,
+        "lastname":     last_name,
+        "surname":      last_name,
+        "family name":  last_name,
+        "family_name":  last_name,
+        "name last name": last_name,
+        "name last":    last_name,
         # contact
         "email":        c.email,
         "email address": c.email,
         "e mail":       c.email,
         "emailaddress": c.email,
         "contact email": c.email,
-        "your contact email": c.email,      # matches E-Logic placeholder
+        "your contact email": c.email,
         "phone":        c.phone,
         "phone number": c.phone,
         "telephone":    c.phone,
@@ -757,40 +829,36 @@ def _profile_as_field_map(c: CandidateProfile) -> Dict[str, str]:
         "mobile number": c.phone,
         "cell phone":   c.phone,
         "contact number": c.phone,
-        # location / address (including Ant Design form IDs)
+        # location / address
         "location":     c.location or "",
         "city":         city,
         "town":         city,
-        "candidate city": city,               # matches "address.candidate_city"
+        "candidate city": city,
         "address candidate city": city,
-        "enter city":   city,                 # matches placeholder
-        "state":        state_country,
-        "province":     state_country,
-        "candidate state": state_country,     # matches "address.candidate_state"
-        "address candidate state": state_country,
-        "country":      state_country,
-        "candidate country": state_country,   # matches "address.candidate_country"
-        "address candidate country": state_country,
-        "address":      c.location or "",
-        "street":       "",                   # need to be filled via AI or left empty
-        "candidate address1": "",
-        "address candidate address1": "",
-        "enter street": "",
-        "postal code":  "",
-        "candidate postal code": "",
-        "address candidate postal code": "",
-        "enter postal code": "",
-        "zip":          "",
-        "zip code":     "",
-        "zipcode":      "",
+        "enter city":   city,
+        "state":        state,
+        "province":     state,
+        "candidate state": state,
+        "address candidate state": state,
+        "country":      country,
+        "candidate country": country,
+        "address candidate country": country,
+        "address":      c.street_address or c.location or "",
+        "street":       c.street_address,
+        "candidate address1": c.street_address,
+        "address candidate address1": c.street_address,
+        "enter street": c.street_address,
+        "postal code":  c.zip_code,
+        "candidate postal code": c.zip_code,
+        "address candidate postal code": c.zip_code,
+        "enter postal code": c.zip_code,
+        "zip":          c.zip_code,
+        "zip code":     c.zip_code,
+        "zipcode":      c.zip_code,
         # cover letter
         "cover letter": c.cover_text,
         "cover_letter": c.cover_text,
         "coverletter":  c.cover_text,
-        "message":      c.cover_text,
-        "additional information": c.cover_text,
-        "comments":     c.cover_text,
-        "notes":        c.cover_text,
         "why are you interested": c.cover_text,
         # generated-resume fields
         "skills":       getattr(c, "technical_skills", "") or "",
@@ -806,10 +874,10 @@ def _profile_as_field_map(c: CandidateProfile) -> Dict[str, str]:
         "linkedin profile": c.linkedin_url or "",
         "linkedin profile url": c.linkedin_url or "",
         "social media": c.linkedin_url or "",
-        "website":      c.linkedin_url or "",
-        "portfolio":    c.linkedin_url or "",
-        "portfolio link": c.linkedin_url or "",   # matches E-Logic "portfolio_link"
-        "enter link to your portfolio": c.linkedin_url or "",  # matches placeholder
+        "website":      getattr(c, "portfolio_url", None) or c.linkedin_url or "",
+        "portfolio":    getattr(c, "portfolio_url", None) or c.linkedin_url or "",
+        "portfolio link": getattr(c, "portfolio_url", None) or c.linkedin_url or "",
+        "enter link to your portfolio": getattr(c, "portfolio_url", None) or c.linkedin_url or "",
     }
 
 
@@ -888,8 +956,10 @@ def _best_match(hints: List[str], field_map: Dict[str, str]) -> Optional[str]:
     """
     # Longer keys are more specific – match them first
     for key in sorted(field_map.keys(), key=len, reverse=True):
+        if len(key) < 3 and key not in ("id", "zip", "tel"): # Avoid short key false positives
+            continue
         for hint in hints:
-            if key in hint or hint in key:
+            if key in hint:
                 val = field_map[key]
                 return val if val else None
     return None
@@ -934,40 +1004,67 @@ async def _fill_dropdowns(page, candidate: CandidateProfile) -> int:
                 # Try to match based on field type
                 selected = False
                 if any(k in hint_str for k in ["country", "nation"]):
-                    # Try to find India or US in options
-                    location = (candidate.location or "").lower()
-                    for val, text in option_values:
-                        if "india" in text or "india" in location:
-                            if "india" in text:
-                                await sel_el.select_option(value=val)
-                                filled += 1
-                                selected = True
-                                break
-                        elif "united states" in text or "usa" in text or "us" in text:
-                            if "us" in location or "usa" in location:
-                                await sel_el.select_option(value=val)
-                                filled += 1
-                                selected = True
-                                break
+                    if getattr(candidate, "country", None):
+                        match = _best_option_match(candidate.country, [txt for _, txt in option_values])
+                        if match:
+                            for val, txt in option_values:
+                                if txt == match:
+                                    await sel_el.select_option(value=val)
+                                    filled += 1
+                                    selected = True
+                                    break
+                    
+                    # Fallback to older heuristic if country is empty
+                    if not selected:
+                        location = (candidate.location or "").lower()
+                        for val, text in option_values:
+                            if "india" in text or "india" in location:
+                                if "india" in text:
+                                    await sel_el.select_option(value=val)
+                                    filled += 1
+                                    selected = True
+                                    break
+                            elif "united states" in text or "usa" in text or "us" in text:
+                                if "us" in location or "usa" in location:
+                                    await sel_el.select_option(value=val)
+                                    filled += 1
+                                    selected = True
+                                    break
 
                 elif any(k in hint_str for k in ["experience", "years"]):
-                    # Select a mid-range experience option
+                    exp_val = str(getattr(candidate, "years_of_experience", ""))
                     for val, text in option_values:
-                        if any(yr in text for yr in ["0", "1", "2", "entry", "junior", "fresher"]):
+                        if exp_val and exp_val in text.split():
+                            await sel_el.select_option(value=val)
+                            filled += 1
+                            selected = True
+                            break
+                        elif (not exp_val or (exp_val.isdigit() and int(exp_val) <= 2)) and any(yr in text for yr in ["0", "1", "2", "entry", "junior", "fresher"]):
                             await sel_el.select_option(value=val)
                             filled += 1
                             selected = True
                             break
 
                 elif any(k in hint_str for k in ["source", "how did you hear", "referral"]):
+                    ref = (getattr(candidate, "referral_source", "linkedin") or "linkedin").lower()
                     for val, text in option_values:
-                        if "linkedin" in text:
+                        if ref in text:
                             await sel_el.select_option(value=val)
                             filled += 1
                             selected = True
                             break
 
                 if selected:
+                    try:
+                        await sel_el.evaluate("""el => {
+                            const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+                            if (setter) setter.call(el, el.value);
+                            el.dispatchEvent(new Event('input', {bubbles: true}));
+                            el.dispatchEvent(new Event('change', {bubbles: true}));
+                            el.dispatchEvent(new FocusEvent('blur', {bubbles: true}));
+                        }""")
+                    except Exception:
+                        pass
                     await human_delay(0.3, 0.7)
             except Exception as exc:
                 logger.debug(f"Dropdown fill error: {exc}")
@@ -1107,7 +1204,7 @@ async def _fill_ant_design_selects(page: Page, candidate: CandidateProfile) -> i
                     continue
 
                 # Click the select to open dropdown
-                selection_div = await sel_el.query_selector(".ant-select-selection")
+                selection_div = await sel_el.query_selector(".ant-select-selection, .ant-select-selector")
                 if selection_div:
                     await selection_div.click()
                 else:
@@ -1161,6 +1258,9 @@ async def _upload_resume_basic(page: Page, resume_path: str) -> int:
     """Find any file-input element and set the resume file path.
     Returns 1 if an upload was performed, else 0.
     This is the basic version used in the semantic fill pipeline."""
+    import os
+    if not resume_path or not os.path.exists(resume_path):
+        return 0
     try:
         await page.wait_for_selector("input[type='file']", state="attached", timeout=5000)
     except Exception:
@@ -1288,30 +1388,37 @@ async def _greenhouse(page: Page, candidate: CandidateProfile) -> int:
     filled = 0
     try:
         gh_fields = {
-            "#first_name":      _first(candidate.name),
-            "#last_name":       _last(candidate.name),
+            "#first_name":      candidate.first_name or _first(candidate.name),
+            "#last_name":       candidate.last_name or _last(candidate.name),
             "#email":           candidate.email,
             "#phone":           candidate.phone,
             "#location":        candidate.location or "",
             "#cover_letter_text": candidate.cover_text,
         }
-        for sel, val in gh_fields.items():
-            if not val:
-                continue
-            el = await page.query_selector(sel)
-            if el and await el.is_visible():
-                await el.fill(val)
-                await human_delay(0.3, 0.7)
-                filled += 1
+        for scope in [page] + page.frames:
+            for sel, val in gh_fields.items():
+                if not val:
+                    continue
+                try:
+                    el = await scope.query_selector(sel)
+                    if el and await el.is_visible():
+                        await el.fill(val)
+                        await human_delay(0.3, 0.7)
+                        filled += 1
+                except Exception:
+                    pass
 
-        # LinkedIn URL field
-        if candidate.linkedin_url:
-            for sel in ["#job_application_answers_question_linkedin_profile",
-                        "input[name*='linkedin']"]:
-                el = await page.query_selector(sel)
-                if el:
-                    await el.fill(candidate.linkedin_url)
-                    filled += 1
+            # LinkedIn URL field
+            if candidate.linkedin_url:
+                for sel in ["#job_application_answers_question_linkedin_profile",
+                            "input[name*='linkedin']"]:
+                    try:
+                        el = await scope.query_selector(sel)
+                        if el and await el.is_visible():
+                            await el.fill(candidate.linkedin_url)
+                            filled += 1
+                    except Exception:
+                        pass
                     break
     except Exception as exc:
         logger.warning(f"Greenhouse adapter error: {exc}")
@@ -1401,6 +1508,37 @@ async def _sap(page: Page, candidate: CandidateProfile) -> int:
     return filled
 
 
+@_register(r"ashbyhq\.com|ashby_jid|jobs\.ashby")
+async def _ashby(page: Page, candidate: CandidateProfile) -> int:
+    """Ashby job board — job pages show 'Overview' | 'Application'. Click into the
+    Application view / 'Apply for this Job', then semantic-fill the standard inputs.
+    *page* may be a Page or a matched Frame."""
+    filled = 0
+    try:
+        for sel in [
+            "[role='tab']:has-text('Application')",
+            "button:has-text('Apply for this Job')",
+            "a:has-text('Apply for this Job')",
+            "button:has-text('Application')",
+        ]:
+            try:
+                el = await page.query_selector(sel)
+                if el and await el.is_visible():
+                    await el.click()
+                    await human_delay(1.5, 2.5)
+                    logger.info(f"Ashby: opened application via {sel!r}")
+                    break
+            except Exception:
+                continue
+        try:
+            filled += await _semantic_fill(page, candidate)
+        except Exception as exc:
+            logger.debug(f"Ashby semantic fill error: {exc}")
+    except Exception as exc:
+        logger.warning(f"Ashby adapter error: {exc}")
+    return filled
+
+
 @_register(r"capgemini\.com|careers\.capgemini")
 async def _capgemini(page: Page, candidate: CandidateProfile) -> int:
     """Capgemini careers – try to click the Apply flow, fill frames, upload resume."""
@@ -1459,7 +1597,7 @@ def _city(location: Optional[str]) -> str:
 
 # ── Universal AI Handler (Fallback) ──────────────────────────────────────────
 
-async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_credentials: Optional[Any], emit: Optional[Any] = None, session_id: str = "default") -> Tuple[int, str]:
+async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_credentials: Optional[Any], emit: Optional[Any] = None, session_id: str = "default", job_description: Optional[str] = None) -> Tuple[int, str]:
     from .config import get_current_gemini_key, get_portal_credentials, GEMINI_MODEL
     from .browser import human_delay
     from pathlib import Path
@@ -1477,9 +1615,9 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
     filled_count = 0
     outcome = "none"  # confirmed | submitted_unconfirmed | filled | blocked | none
 
-    for step in range(8):
+    for step in range(20):
         if emit:
-            emit({"type": "log", "level": "info", "message": f"AI Handler Step {step + 1}/8..."})
+            emit({"type": "log", "level": "info", "message": f"AI Handler Step {step + 1}/20..."})
         
         await human_delay(2.0, 4.0)
         
@@ -1520,6 +1658,12 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
             outcome = "blocked"
             if emit:
                 emit({"type": "manual_login_required", "message": "CAPTCHA detected. Please solve it manually."})
+            break
+        elif page_type == "ALREADY_APPLIED":
+            outcome = "confirmed"
+            logger.info("Already applied to this job.")
+            if emit:
+                emit({"type": "log", "level": "info", "message": "✓ Already applied to this job!"})
             break
         elif page_type == "CONFIRMATION":
             outcome = "confirmed"
@@ -1612,14 +1756,14 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
             
             if not email or not password:
                 logger.warning("Missing portal credentials for login/register.")
-                outcome = "blocked"
-                break
+                await pause_checkpoint(session_id, emit, "Login required but no portal credentials found. Please login manually, then resume.", page=page)
+                continue
             
             logger.info(f"Using {'generated' if is_register else 'actual'} password for {page_type}")
             if emit:
                 emit({"type": "log", "level": "info", "message": f"Attempting {page_type.lower().replace('_', ' ')} with portal credentials..."})
                 
-            fields = await map_form_fields(page, candidate, client, page_type, email, password, emit, session_id)
+            fields = await map_form_fields(page, candidate, client, page_type, email, password, emit, session_id, job_description)
             if not fields:
                 logger.warning("No fields mapped for login/register.")
                 break
@@ -1635,7 +1779,7 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
             except Exception as e:
                 logger.debug(f"Failed to capture form_before.png: {e}")
 
-            fields = await map_form_fields(page, candidate, client, page_type, "", "", emit, session_id)
+            fields = await map_form_fields(page, candidate, client, page_type, "", "", emit, session_id, job_description)
             if fields:
                 gemini_count = sum(1 for f in fields if f.get('source') == 'GEMINI')
                 filled_count += await fill_and_submit_mapped_fields(page, fields, candidate, client, emit, session_id)
@@ -1714,19 +1858,24 @@ async def _ai_fallback_handler(page: Page, candidate: CandidateProfile, login_cr
             await human_delay(1.5, 2.5)
 
             # Validation-aware retry: if the page didn't advance and shows field
-            # errors, re-map only what's wrong, fill it, and submit once more.
-            errors = await _collect_validation_errors(page)
-            if errors and page.url == url_before:
+            # errors, re-map only what's wrong, fill it, and submit (up to 3 times).
+            retry_attempts = 0
+            while retry_attempts < 3:
+                errors = await _collect_validation_errors(page)
+                if not errors or page.url != url_before:
+                    break
+                
                 if emit:
                     emit({"type": "log", "level": "warning",
-                          "message": f"Form rejected ({len(errors)} field error(s)) — fixing and retrying..."})
-                logger.info(f"Validation errors after submit: {errors[:5]}")
-                refields = await map_form_fields(page, candidate, client, "APPLICATION_FORM", "", "", emit, session_id)
+                          "message": f"Form rejected ({len(errors)} field error(s)) — fixing and retrying (attempt {retry_attempts+1}/3)..."})
+                logger.info(f"Validation errors after submit (attempt {retry_attempts+1}): {errors[:5]}")
+                refields = await map_form_fields(page, candidate, client, "APPLICATION_FORM", "", "", emit, session_id, job_description)
                 if refields:
                     filled_count += await fill_and_submit_mapped_fields(page, refields, candidate, client, emit, session_id)
                 await _handle_recaptcha_before_submit(page, emit, session_id)
                 await click_next_or_submit(page)
                 await human_delay(1.5, 2.5)
+                retry_attempts += 1
 
             # Upgrade 7: Post-submit confirmation (returns status; never raises)
             status = await _post_submit_confirmation(page, emit)
@@ -1850,6 +1999,12 @@ async def fill_dropdown(page: Page, selector: str, desired_value: str, known_opt
 async def _upload_resume(page: Page, resume_path: str, emit: Optional[Any] = None) -> int:
     """Upgrade 4: Dual resume upload handling."""
     from .browser import human_delay
+    import os
+    if not resume_path or not os.path.exists(resume_path):
+        logger.warning(f"Resume path missing or invalid: {resume_path}")
+        if emit:
+            emit({"type": "log", "level": "warning", "message": f"Resume upload failed: file not found at {resume_path}"})
+        return 0
     try:
         # Check for 'Attach resume' button
         attach_btns = await page.query_selector_all("button, a")
@@ -2071,8 +2226,8 @@ async def _post_submit_confirmation(page: Page, emit: Optional[Any]) -> str:
         success_phrases = ["application submitted", "thank you for applying", "we have received your application", "application complete", "you have successfully applied", "your application has been received"]
 
         found_success = False
-        for _ in range(5):
-            await asyncio.sleep(2)
+        for _ in range(3):
+            await asyncio.sleep(1.5)
             url = page.url.lower()
             if any(ind in url for ind in success_indicators):
                 found_success = True
@@ -2160,6 +2315,17 @@ async def _heuristic_classify_page(page: Page) -> Tuple[str, str]:
         ]
         if any(phrase in body_text for phrase in confirmation_phrases):
             return "CONFIRMATION", f"Page contains confirmation phrase"
+
+        # ── ALREADY APPLIED detection ─────────────────────────────────────
+        already_applied_phrases = [
+            "already applied",
+            "you have already applied",
+            "application on file",
+            "you already applied for this job",
+            "already submitted"
+        ]
+        if any(phrase in body_text for phrase in already_applied_phrases):
+            return "ALREADY_APPLIED", "Page indicates candidate has already applied"
 
         # ── CAPTCHA widget presence (deferred verdict) ────────────────────
         # A visible reCAPTCHA/hCaptcha widget appears on MOST application forms
@@ -2310,7 +2476,7 @@ def _norm(s: Any) -> str:
     if not s:
         return ""
     s = str(s).lower()
-    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    s = re.sub(r"[^\w\s]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -2370,7 +2536,11 @@ def _best_option_match(value: str, options: List[str]) -> Optional[str]:
         score = len(vtokens & set(n.split()))
         if score > best_score:
             best, best_score = o, score
-    return best
+    
+    # Require at least 2 matching tokens, or 50% overlap for short strings
+    if best_score >= 2 or (vtokens and best_score / len(vtokens) >= 0.5):
+        return best
+    return None
 
 
 def _humanize(name: str) -> str:
@@ -2599,31 +2769,24 @@ def _resolve_known_value(field: Dict, candidate: CandidateProfile, page_type: st
         if "password" in search_text:
             return password, "PROFILE"
 
-    name = candidate.name or ""
-    parts = name.split(" ")
-    loc_parts = [p.strip() for p in (candidate.location or "").split(",") if p.strip()]
-
-    if "first name" in search_text and name:
-        return parts[0], "INFERRED"
-    if ("last name" in search_text or "surname" in search_text or "family name" in search_text) and name:
-        return (" ".join(parts[1:]) if len(parts) > 1 else parts[0]), "INFERRED"
-    if "full name" in search_text and name:
-        return name, "PROFILE"
-    if "name" in search_text and name and "company" not in search_text and "user" not in search_text:
-        return name, "PROFILE"
+    if "first name" in search_text and candidate.first_name:
+        return candidate.first_name, "PROFILE"
+    if ("last name" in search_text or "surname" in search_text or "family name" in search_text) and candidate.last_name:
+        return candidate.last_name, "PROFILE"
+    if "full name" in search_text and (candidate.name or candidate.first_name):
+        return candidate.name or f"{candidate.first_name} {candidate.last_name}".strip(), "PROFILE"
+    if "name" in search_text and (candidate.name or candidate.first_name) and "company" not in search_text and "user" not in search_text:
+        return candidate.name or f"{candidate.first_name} {candidate.last_name}".strip(), "PROFILE"
     if "email" in search_text and candidate.email:
         return candidate.email, "PROFILE"
     if ("phone" in search_text or "mobile" in search_text or "telephone" in search_text) and candidate.phone:
         return candidate.phone, "PROFILE"
-    if "country" in search_text and loc_parts:
-        return loc_parts[-1], "INFERRED"
-    if "city" in search_text and loc_parts:
-        return loc_parts[0], "INFERRED"
-    if ("state" in search_text or "province" in search_text) and loc_parts:
-        if len(loc_parts) > 2:
-            return loc_parts[1], "INFERRED"
-        if len(loc_parts) == 2:
-            return loc_parts[0], "INFERRED"
+    if "country" in search_text and candidate.country:
+        return candidate.country, "PROFILE"
+    if "city" in search_text and candidate.city:
+        return candidate.city, "PROFILE"
+    if ("state" in search_text or "province" in search_text) and candidate.state:
+        return candidate.state, "PROFILE"
     if "years of experience" in search_text and candidate.years_of_experience:
         return candidate.years_of_experience, "PROFILE"
     if "linkedin" in search_text and candidate.linkedin_url:
@@ -2914,16 +3077,23 @@ async def click_next_or_submit(page: Page) -> bool:
         "button:has-text('Submit')",
         "a:has-text('Next')",
         "a:has-text('Continue')",
-        "button:has-text('Apply')"
+        "button:has-text('Apply')",
+        "button:has-text('Save and Continue')",
+        "button[aria-label*='Next']",
+        "button[aria-label*='Continue']"
     ]
+    bad_words = ["back", "previous", "cancel", "return", "login", "sign in"]
     for sel in btn_selectors:
         try:
-            btn = await page.query_selector(sel)
-            if btn and await btn.is_visible() and await btn.is_enabled():
-                await btn.click()
-                await human_delay(2.0, 4.0)
-                logger.info(f"Clicked navigation button: {sel}")
-                return True
+            btns = await page.query_selector_all(sel)
+            for btn in btns:
+                if await btn.is_visible() and await btn.is_enabled():
+                    btn_text = (await btn.inner_text()).lower()
+                    if not any(bw in btn_text for bw in bad_words):
+                        await btn.click()
+                        await human_delay(2.0, 4.0)
+                        logger.info(f"Clicked navigation button: {sel}")
+                        return True
         except Exception:
             pass
     return False
