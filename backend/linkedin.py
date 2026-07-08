@@ -12,6 +12,7 @@ Covers
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 import urllib.parse
@@ -914,6 +915,208 @@ async def open_external_apply_page(context, job_url: str, page: Page) -> tuple[O
     except Exception as exc:
         logger.debug(f"open_external_apply_page error for {job_url}: {exc}")
     return None, None
+
+async def handle_easy_apply(page: Page, job_url: str, candidate, emit=None) -> tuple[str, int]:
+    """Drive LinkedIn's in-site 'Easy Apply' modal.
+
+    Returns (outcome, filled_count) where outcome is one of:
+      "confirmed"  – submitted and LinkedIn showed the success dialog.
+      "manual"     – filled what we could but a step needs a human (unknown
+                     required question, CAPTCHA, or too many wizard steps).
+      "failed"     – could not open or progress the modal.
+
+    Conservative by design: it fills the fields it recognises, answers simple
+    yes/no + dropdowns safely, and steps through Next/Review/Submit. If it meets a
+    required field it can't confidently answer, it stops at "manual" rather than
+    submitting bad data.
+    """
+    def _log(level, msg):
+        _emit(emit, "log", level=level, message=msg)
+
+    try:
+        if page.url.split("?")[0].rstrip("/") != job_url.split("?")[0].rstrip("/"):
+            await goto_with_retries(page, job_url, timeout=_NAV_TIMEOUT)
+            await human_delay(1.5, 2.5)
+
+        # Open the Easy Apply modal.
+        try:
+            btn = await page.wait_for_selector(
+                "button.jobs-apply-button, button[aria-label*='Easy Apply' i]",
+                timeout=6000,
+            )
+        except PWTimeout:
+            btn = None
+        if not btn:
+            return "failed", 0
+        await btn.click()
+        await human_delay(1.5, 2.5)
+
+        modal = await page.query_selector("div.jobs-easy-apply-modal, div[role='dialog']")
+        if not modal:
+            _log("warning", "Easy Apply modal did not open.")
+            return "failed", 0
+
+        filled = 0
+        # Walk up to 8 wizard steps.
+        for step in range(8):
+            await human_delay(0.8, 1.5)
+            filled += await _easy_apply_fill_visible(page, candidate)
+
+            # Success dialog?
+            done = await page.query_selector(
+                "text=/application (was )?sent/i, text=/your application was sent/i, "
+                "h2:has-text('Application sent'), h3:has-text('Application sent')"
+            )
+            if done:
+                _log("success", "Easy Apply: 'Application sent' confirmed.")
+                return "confirmed", filled
+
+            # Find the primary advance button inside the modal.
+            submit_b = await page.query_selector("button[aria-label*='Submit application' i]")
+            review_b = await page.query_selector("button[aria-label*='Review' i]")
+            next_b = await page.query_selector(
+                "button[aria-label*='Continue to next step' i], button[aria-label*='Next' i]"
+            )
+
+            target = submit_b or review_b or next_b
+            if not target:
+                # No advance control — maybe a plain footer Submit/Next by text.
+                for txt in ("Submit application", "Submit", "Review", "Next", "Continue"):
+                    cand = await page.query_selector(f"footer button:has-text('{txt}'), div[role='dialog'] button:has-text('{txt}')")
+                    if cand and await cand.is_visible():
+                        target = cand
+                        break
+            if not target:
+                _log("warning", "Easy Apply: no Next/Submit button found — needs manual completion.")
+                return "manual", filled
+
+            # If this is the final Submit, only click when no required field is empty.
+            is_submit = target is submit_b or "submit" in ((await target.inner_text()) or "").lower()
+            if is_submit:
+                empty_required = await _easy_apply_has_empty_required(page)
+                if empty_required:
+                    _log("warning", "Easy Apply: required questions remain — leaving for manual review (not submitted).")
+                    return "manual", filled
+
+            await target.click()
+            await human_delay(1.2, 2.2)
+
+            if is_submit:
+                # Post-submit: LinkedIn shows a 'sent' dialog.
+                await human_delay(1.0, 2.0)
+                body = ""
+                try:
+                    body = (await page.inner_text("body")).lower()
+                except Exception:
+                    pass
+                if "application sent" in body or "application was sent" in body:
+                    _log("success", "Easy Apply submitted & confirmed.")
+                    return "confirmed", filled
+                return "manual", filled
+
+        _log("warning", "Easy Apply exceeded step limit — needs manual completion.")
+        return "manual", filled
+    except Exception as exc:
+        logger.error(f"handle_easy_apply error: {exc}")
+        return "failed", 0
+
+
+async def _easy_apply_fill_visible(page: Page, candidate) -> int:
+    """Fill the visible text inputs in the Easy Apply modal from the profile.
+    Conservative: only fills fields it can map to a known profile value."""
+    filled = 0
+    field_map = {
+        "email": candidate.email,
+        "phone": candidate.phone,
+        "mobile": candidate.phone,
+        "first name": candidate.first_name or (candidate.name.split(" ")[0] if candidate.name else ""),
+        "last name": candidate.last_name or (candidate.name.split(" ", 1)[1] if candidate.name and " " in candidate.name else ""),
+        "city": candidate.city or ((candidate.location or "").split(",")[0] if candidate.location else ""),
+        "linkedin": candidate.linkedin_url or "",
+    }
+    try:
+        inputs = await page.query_selector_all(
+            "div[role='dialog'] input[type='text'], div[role='dialog'] input[type='email'], "
+            "div[role='dialog'] input[type='tel'], div[role='dialog'] textarea"
+        )
+    except Exception:
+        inputs = []
+    for inp in inputs:
+        try:
+            if not await inp.is_visible() or not await inp.is_enabled():
+                continue
+            if (await inp.input_value()):
+                continue
+            hint = " ".join(filter(None, [
+                (await inp.get_attribute("aria-label") or ""),
+                (await inp.get_attribute("name") or ""),
+                (await inp.get_attribute("id") or ""),
+            ])).lower()
+            value = None
+            for key, val in field_map.items():
+                if key in hint and val:
+                    value = val
+                    break
+            if value:
+                await inp.fill(str(value))
+                await human_delay(0.2, 0.5)
+                filled += 1
+        except Exception:
+            continue
+
+    # Native dropdowns: pick the first non-placeholder option if still unset
+    # (LinkedIn phone country / experience selects). Best-effort.
+    try:
+        selects = await page.query_selector_all("div[role='dialog'] select")
+        for sel in selects:
+            if not await sel.is_visible():
+                continue
+            val = await sel.input_value()
+            if val:
+                continue
+            opts = await sel.query_selector_all("option")
+            for o in opts:
+                ov = await o.get_attribute("value")
+                ot = ((await o.inner_text()) or "").strip().lower()
+                if ov and ot not in ("", "select an option", "select"):
+                    await sel.select_option(value=ov)
+                    filled += 1
+                    break
+    except Exception:
+        pass
+    return filled
+
+
+async def _easy_apply_has_empty_required(page: Page) -> bool:
+    """True if the Easy Apply modal has a required field still empty (so we must
+    NOT auto-submit and should hand off to the human)."""
+    try:
+        return await page.evaluate(
+            """() => {
+                const scope = document.querySelector("div[role='dialog']") || document;
+                const els = scope.querySelectorAll('input, select, textarea');
+                for (const el of els) {
+                    const t = (el.type || el.tagName).toLowerCase();
+                    if (['hidden','submit','button'].includes(t)) continue;
+                    if (el.offsetParent === null && t !== 'file') continue;
+                    const req = el.hasAttribute('required') || el.getAttribute('aria-required') === 'true';
+                    if (!req) continue;
+                    if (t === 'radio' || t === 'checkbox') {
+                        if (el.name) {
+                            const any = scope.querySelector('input[name="'+CSS.escape(el.name)+'"]:checked');
+                            if (!any) return true;
+                        } else if (!el.checked) return true;
+                    } else if (!(el.value || '').trim()) {
+                        return true;
+                    }
+                }
+                return false;
+            }"""
+        )
+    except Exception:
+        # If we can't tell, err toward manual (don't auto-submit).
+        return True
+
 
 async def discover_post_leads(page, max_leads: int) -> list:
     """Scroll through LinkedIn posts and extract recruiter emails."""

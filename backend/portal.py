@@ -382,10 +382,6 @@ async def autofill_portal_form(
     except Exception as exc:
         logger.debug(f"Cookie accept error: {exc}")
 
-    portal_state = await detect_portal_state(page)
-    if portal_state:
-        logger.info(f"Portal state detected: {portal_state}")
-
     filled = 0
     try:
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 3)")
@@ -397,8 +393,20 @@ async def autofill_portal_form(
 
     # Reveal the application form: click an "Application" tab or "Apply" button
     # (Ashby/Lever/Greenhouse job pages show Overview | Application, or an
-    # "Apply for this Job" button that expands the form).
-    filled += await _discover_and_click_apply(page)
+    # "Apply for this Job" button that expands the form). Many LinkedIn-sourced
+    # links land on a job-DESCRIPTION page (swooped.co, bestjobtool.com, company
+    # careers) whose "Apply" / "Quick Apply" / "I'm Interested" button opens the
+    # real form — sometimes in a NEW TAB. This step may therefore return a
+    # different Page; continue the whole pipeline on whatever it returns.
+    page, opened = await _discover_and_click_apply(page, context)
+    filled += opened
+
+    # Detect login/registration/CAPTCHA walls AFTER trying to open the form, so we
+    # classify the real application page (or the new tab) rather than the job-
+    # description landing page we started on.
+    portal_state = await detect_portal_state(page)
+    if portal_state:
+        logger.info(f"Portal state detected: {portal_state}")
 
     # ── Layer 0: Resume-first upload ──────────────────────────────────────
     # Big ATSes (Workday/Greenhouse/etc.) auto-populate fields by parsing the
@@ -560,66 +568,205 @@ async def _accept_cookie_banner(page) -> bool:
     return False
 
 
-async def _discover_and_click_apply(page) -> int:
-    """Look for 'Apply', 'Apply Now', or an 'Application' tab and click to open the
-    form. IMPORTANT: Do NOT click 'Submit', 'Send application', or form submit buttons."""
-    # Only look for buttons/tabs that OPEN the application form, not submit it.
-    # "Application" tab first — Ashby/Lever job pages show Overview | Application.
-    apply_selectors = [
-        "[role='tab']:has-text('Application')",
-        "[role='tab']:has-text('Apply')",
-        "button:has-text('Apply Now')",
-        "a:has-text('Apply Now')",
-        "button:has-text('Apply for this Job')",
-        "a:has-text('Apply for this Job')",
-        "button:has-text('Apply for this job')",
-        "a:has-text('Apply for this job')",
-        "button:has-text('Start Application')",
-        "a:has-text('Start Application')",
-        "button:has-text('Application')",
-        "a:has-text('Application')",
-        "[data-automation-id='applyButton']",
-        "button.apply-button",
-        "a.apply-button",
-        "#apply-button",
-        ".apply-btn",
-    ]
-    # Words that indicate a SUBMIT action (not an open-form action)
-    submit_words = [
-        "applied", "close", "cancel", "submit", "send",
-        "confirm", "done", "finish", "complete", "save",
-    ]
-    for sel in apply_selectors:
+async def _count_visible_form_fields(scope) -> int:
+    """Count visible text-like inputs/textareas in a page or frame (best-effort)."""
+    try:
+        fields = await scope.query_selector_all(
+            "input[type='text'], input[type='email'], input[type='tel'], "
+            "input[type='number'], input[type='url'], textarea, select"
+        )
+    except Exception:
+        return 0
+    n = 0
+    for f in fields[:12]:
         try:
-            btn = await page.query_selector(sel)
-            if btn and await btn.is_visible():
-                btn_text = (await btn.inner_text()).strip().lower()
-                # Skip if the button text contains submit-like words
-                if any(w in btn_text for w in submit_words):
-                    logger.debug(f"Skipping submit-like button: '{btn_text}'")
-                    continue
-                # Skip if form fields are already visible (form is already open)
-                form_fields = await page.query_selector_all(
-                    "input[type='text']:visible, input[type='email']:visible, "
-                    "input[type='tel']:visible, textarea:visible"
-                )
-                visible_count = 0
-                for f in form_fields[:5]:
-                    try:
-                        if await f.is_visible():
-                            visible_count += 1
-                    except Exception:
-                        pass
-                if visible_count >= 2:
-                    logger.debug(f"Form fields already visible ({visible_count}), skipping apply button click")
-                    return 0
-                await btn.click()
-                await human_delay(1.5, 3.0)
-                logger.info(f"Clicked apply button: {sel}")
-                return 0
+            if await f.is_visible():
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
+async def _page_has_form(page) -> bool:
+    """True if the page (or any child frame) already shows a usable form."""
+    total = await _count_visible_form_fields(page)
+    if total >= 2:
+        return True
+    for fr in page.frames:
+        if fr is page.main_frame:
+            continue
+        try:
+            if await _count_visible_form_fields(fr) >= 2:
+                return True
+        except Exception:
+            pass
+    # A file input alone (resume upload) also counts as a form being present.
+    try:
+        fi = await page.query_selector("input[type='file']")
+        if fi:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# Button/anchor/tab TEXT that OPENS an application form. Ordered most→least
+# specific. Kept broad on purpose: LinkedIn-sourced links land on many different
+# aggregator / careers pages whose "open the form" control is worded differently.
+_OPEN_FORM_TEXTS = [
+    "apply for this job", "apply for this position", "apply now", "quick apply",
+    "start application", "start your application", "begin application",
+    "apply on company site", "apply to this job", "apply externally",
+    "i'm interested", "im interested", "i am interested", "express interest",
+    "apply", "application",
+]
+# Substrings that mean the control SUBMITS or is otherwise NOT an "open form"
+# action. A candidate whose text contains any of these is rejected.
+_NOT_OPEN_FORM = [
+    "applied", "already applied", "close", "cancel", "back", "previous",
+    "submit", "send application", "send message", "confirm", "done",
+    "finish", "save and", "sign in", "log in", "login", "register",
+    "create account", "withdraw", "share", "save job", "how to apply",
+]
+
+
+async def _discover_and_click_apply(page, context=None):
+    """Open the application form when the current page is a job-DESCRIPTION /
+    landing page whose "Apply" / "Quick Apply" / "I'm Interested" control reveals
+    (or navigates to) the real form.
+
+    Returns (page, opened) where *page* is the page to continue on (a NEW tab if
+    the button opened one) and *opened* is 1 if we clicked something, else 0.
+
+    NEVER clicks a submit/confirm control (see _NOT_OPEN_FORM). If a real form is
+    already visible, returns immediately without clicking.
+    """
+    # Already on a form? Don't touch anything.
+    try:
+        if await _page_has_form(page):
+            logger.debug("Form already visible — skipping open-form click.")
+            return page, 0
+    except Exception:
+        pass
+
+    # Cookie banners frequently intercept the first click — clear them first.
+    try:
+        await _accept_cookie_banner(page)
+    except Exception:
+        pass
+
+    # ── Score every candidate control by how strongly its text says "open form".
+    candidates = []  # (score, element, text)
+    try:
+        els = await page.query_selector_all(
+            "button, a, [role='button'], [role='tab'], input[type='button'], "
+            "input[type='submit'], [data-automation-id='applyButton'], "
+            ".apply-button, .apply-btn, #apply-button"
+        )
+    except Exception:
+        els = []
+
+    for el in els[:150]:
+        try:
+            if not await el.is_visible() or not await el.is_enabled():
+                continue
+            raw = ((await el.inner_text()) or "").strip()
+            if not raw:
+                # Fall back to aria-label / value for icon-only buttons.
+                raw = (await el.get_attribute("aria-label")
+                       or await el.get_attribute("value") or "").strip()
+            t = _norm(raw)
+            if not t or len(t) > 40:
+                continue
+            if any(bad in t for bad in _NOT_OPEN_FORM):
+                continue
+            score = 0
+            for i, phrase in enumerate(_OPEN_FORM_TEXTS):
+                if phrase in t:
+                    # Earlier (more specific) phrases score higher; exact match best.
+                    score = max(score, (len(_OPEN_FORM_TEXTS) - i) + (5 if t == phrase else 0))
+            if score:
+                candidates.append((score, el, raw))
         except Exception:
             continue
-    return 0
+
+    if not candidates:
+        logger.debug("No open-form (Apply) control found on page.")
+        return page, 0
+
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    # Try the best candidates in order until one reveals a form / navigates.
+    for score, btn, label in candidates[:4]:
+        try:
+            start_url = page.url
+            new_tab = None
+            # An Apply control may open a NEW TAB. Race a page-open event against
+            # the click so we capture it if it happens.
+            popup_task = None
+            if context is not None:
+                try:
+                    popup_task = asyncio.create_task(context.wait_for_event("page", timeout=6000))
+                except Exception:
+                    popup_task = None
+
+            try:
+                await btn.click(timeout=6000)
+            except Exception:
+                # Overlay may be intercepting — dismiss cookies and retry once via JS.
+                try:
+                    await _accept_cookie_banner(page)
+                    await btn.evaluate("el => el.click()")
+                except Exception:
+                    if popup_task:
+                        popup_task.cancel()
+                    continue
+
+            await human_delay(1.5, 3.0)
+
+            # Did a new tab open?
+            if popup_task:
+                try:
+                    new_tab = await popup_task
+                except Exception:
+                    new_tab = None
+
+            if new_tab:
+                try:
+                    await new_tab.wait_for_load_state("domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+                await human_delay(1.0, 2.0)
+                try:
+                    await _accept_cookie_banner(new_tab)
+                except Exception:
+                    pass
+                logger.info(f"Apply control '{label}' opened a new tab: {new_tab.url}")
+                return new_tab, 1
+
+            # Same-tab: did we navigate or reveal a form?
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=6000)
+            except Exception:
+                pass
+            navigated = (page.url != start_url)
+            has_form = await _page_has_form(page)
+            if navigated or has_form:
+                try:
+                    await _accept_cookie_banner(page)
+                except Exception:
+                    pass
+                logger.info(f"Clicked apply control '{label}' "
+                            f"({'navigated' if navigated else 'form revealed'}).")
+                return page, 1
+            logger.debug(f"Apply control '{label}' clicked but no form appeared — trying next.")
+        except Exception as exc:
+            logger.debug(f"Apply control click error: {exc}")
+            continue
+
+    # We clicked something but couldn't confirm a form; return page anyway so the
+    # downstream layers still get a chance on whatever rendered.
+    return page, 1
 
 
 async def _follow_linkedin_interstitial(page: Page) -> bool:
@@ -1053,6 +1200,34 @@ async def _fill_dropdowns(page, candidate: CandidateProfile) -> int:
                             filled += 1
                             selected = True
                             break
+
+                elif any(k in hint_str for k in ["position", "role", "job title", "department", "applying for", "vacancy", "opening"]):
+                    # Match the candidate's target role / current title against the
+                    # option list (e.g. a "Position" dropdown on a company careers
+                    # form). This is what stalled the completeness gate before.
+                    desired = (getattr(candidate, "target_role", "")
+                               or getattr(candidate, "current_job_title", "") or "")
+                    real_opts = [(val, text) for val, text in option_values
+                                 if text and text not in ("select", "select one", "please select", "choose")]
+                    if desired:
+                        match = _best_option_match(desired, [txt for _, txt in real_opts])
+                        if match:
+                            for val, text in real_opts:
+                                if text == match:
+                                    await sel_el.select_option(value=val)
+                                    filled += 1
+                                    selected = True
+                                    break
+                    # Last resort: a required Position select with no match still
+                    # needs a value or the form won't submit — pick the first real one.
+                    if not selected and real_opts:
+                        is_required = await sel_el.get_attribute("required")
+                        aria_req = await sel_el.get_attribute("aria-required")
+                        if is_required is not None or aria_req == "true":
+                            val, _ = real_opts[0]
+                            await sel_el.select_option(value=val)
+                            filled += 1
+                            selected = True
 
                 if selected:
                     try:
@@ -2806,10 +2981,13 @@ def _resolve_known_value(field: Dict, candidate: CandidateProfile, page_type: st
     return None, None
 
 
-async def map_form_fields(page: Page, candidate: CandidateProfile, client: Any, page_type: str, email: str, password: str, emit: Optional[Any] = None, session_id: str = "default") -> List[Dict]:
+async def map_form_fields(page: Page, candidate: CandidateProfile, client: Any, page_type: str, email: str, password: str, emit: Optional[Any] = None, session_id: str = "default", job_description: Optional[str] = None) -> List[Dict]:
     """Scan every frame, build a list of *logical* fields, resolve each value via
     deterministic rules first, then resolve all remaining unknowns in ONE batched
-    Gemini call. Returns a list of fill instructions for fill_and_submit_mapped_fields."""
+    Gemini call. Returns a list of fill instructions for fill_and_submit_mapped_fields.
+
+    *job_description* (optional) is passed through to the batched AI resolver so
+    open-ended textarea answers can be tailored to the specific role."""
     import json
 
     profile_json = candidate.model_dump_json(exclude={"resume_path"})
@@ -2899,7 +3077,7 @@ async def map_form_fields(page: Page, candidate: CandidateProfile, client: Any, 
 
         # ── Batched Gemini resolution for everything still unknown ────────────
         if unknown:
-            answers = await _batch_ai_answers(unknown, profile_json, client, page, emit, session_id)
+            answers = await _batch_ai_answers(unknown, profile_json, client, page, emit, session_id, job_description)
             for f in unknown:
                 val = answers.get(f.get("ai_id") or f.get("name") or "")
                 if val:
@@ -2930,7 +3108,8 @@ def _make_fill(field: Dict, value: str, source: str) -> Dict:
 
 
 async def _batch_ai_answers(unknown: List[Dict], profile_json: str, client: Any,
-                            page: Page, emit: Optional[Any], session_id: str) -> Dict[str, str]:
+                            page: Page, emit: Optional[Any], session_id: str,
+                            job_description: Optional[str] = None) -> Dict[str, str]:
     """Ask Gemini for ALL unknown field values in one structured call.
 
     Returns {ai_id_or_name: value}. Falls back to per-field calls if the batch
@@ -2944,6 +3123,8 @@ async def _batch_ai_answers(unknown: List[Dict], profile_json: str, client: Any,
             job_title = (await el.inner_text())[:120]
     except Exception:
         pass
+
+    jd_snippet = (job_description or "")[:1500]
 
     # ── Consult the content-keyed cache first; only ask Gemini for misses ──────
     cached: Dict[str, str] = {}
@@ -2981,7 +3162,8 @@ async def _batch_ai_answers(unknown: List[Dict], profile_json: str, client: Any,
         "specific to the candidate. For yes/no questions not covered by the profile, "
         "prefer the answer that keeps the candidate eligible. Never return an empty string.\n"
         f"Job title on page: {job_title}\n"
-        f"Candidate profile JSON: {profile_json}\n"
+        + (f"Job description (for tailoring open answers): {jd_snippet}\n" if jd_snippet else "")
+        + f"Candidate profile JSON: {profile_json}\n"
         f"Fields (JSON array): {json.dumps(spec, ensure_ascii=False)}"
     )
 

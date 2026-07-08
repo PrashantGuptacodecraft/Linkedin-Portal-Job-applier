@@ -2052,6 +2052,16 @@ Ideal role(s): Java Developer, Backend Developer</textarea>
       </div>
       <div class="toggle-row" style="margin-top:.6rem">
         <div>
+          <div class="toggle-label">Auto-Submit Applications</div>
+          <div class="toggle-desc">Submit automatically without manual review (NOT RECOMMENDED)</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="auto_submit" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="toggle-row" style="margin-top:.6rem">
+        <div>
           <div class="toggle-label">Visible browser</div>
           <div class="toggle-desc">Required for 2FA &amp; manual login (recommended)</div>
         </div>
@@ -2115,13 +2125,13 @@ Ideal role(s): Java Developer, Backend Developer</textarea>
         <div class="log-console" id="log-console"></div>
       </div>
 
-      <!-- Job Results -->
+      <!-- Task Dashboard -->
       <div class="card section-gap">
-        <div class="card-title"><span class="icon">📋</span> Job Results</div>
-        <div class="job-list" id="job-list">
-          <div class="empty-state" id="job-list-empty">
+        <div class="card-title"><span class="icon">📋</span> Application Tasks</div>
+        <div class="job-list" id="task-list">
+          <div class="empty-state" id="task-list-empty">
             <div class="empty-icon">📭</div>
-            <div>Results will appear here as jobs are processed…</div>
+            <div>Tasks will appear here as jobs are processed…</div>
           </div>
         </div>
       </div>
@@ -2840,6 +2850,7 @@ function buildPayload() {
       remote_only:         document.getElementById('remote_only')?.checked ?? false,
       extra_params: {
         search_in: v('search_in') || 'linkedin_jobs',
+        auto_submit: document.getElementById('auto_submit')?.checked ? "true" : "false",
       },
     },
   };
@@ -2965,7 +2976,6 @@ function setRunning(running) {
     if (resumeBtn) resumeBtn.style.display = 'none';
     if (pauseStatus) pauseStatus.style.display = 'none';
   }
-  
   const startBtn    = document.getElementById('start-btn');
   const stopBtn     = document.getElementById('stop-btn');
   const topStart    = document.getElementById('top-start-btn');
@@ -3062,7 +3072,14 @@ function handleEvent(evt) {
       updateStats();
       updateProgress();
       updatePills();
-      addJobCard(j);
+      addTaskCard(j);
+      break;
+    }
+    
+    case 'task_added':
+    case 'task_updated': {
+      // Used if we stream tasks directly via TaskManager
+      updateTaskCard(evt.task);
       break;
     }
 
@@ -3178,12 +3195,12 @@ function logLine(level, msg) {
   el.scrollTop = el.scrollHeight;
 }
 
-function addJobCard(j) {
-  const list  = document.getElementById('job-list');
-  const empty = document.getElementById('job-list-empty');
+function addTaskCard(j) {
+  const list  = document.getElementById('task-list');
+  const empty = document.getElementById('task-list-empty');
   if (empty) empty.remove();
 
-  const icons = { applied: '✅', skipped: '⏭️', failed: '❌', pending: '⏳' };
+  const icons = { applied: '✅', skipped: '⏭️', failed: '❌', pending: '⏳', manual_review: '⏸️' };
   const card  = document.createElement('div');
   card.className = 'job-card';
 
@@ -3198,15 +3215,61 @@ function addJobCard(j) {
     meta += `${meta ? ' · ' : ''}<a href="#" onclick="toggleDiagnostics();return false;">diagnostics</a>`;
   }
 
+  const icon  = icons[j.status] || '⚡';
+  const badge = `<div class="job-badge ${j.status}">${j.status}</div>`;
+
   card.innerHTML = `
-    <div class="job-icon">${icons[j.status] || '⏳'}</div>
+    <div class="job-icon">${icon}</div>
     <div class="job-info">
-      <div class="job-title">${escHtml(j.title || 'Untitled')}</div>
-      <div class="job-company">${escHtml(j.company || 'Unknown company')}</div>
+      <div class="job-title"><a href="${j.job_url || '#'}" target="_blank">${escHtml(j.title || 'Unknown Role')}</a></div>
+      <div class="job-company">${escHtml(j.company || 'Unknown Company')}</div>
       ${meta ? `<div class="job-meta">${meta}</div>` : ''}
     </div>
-    <div class="job-badge ${j.status}">${j.status}</div>`;
-  list.appendChild(card);
+    ${j.status === 'manual_review' ? `<button class="btn btn-outline" style="padding:4px 8px;font-size:11px" onclick="window.open('${j.apply_url || j.job_url}', '_blank')">Review & Submit</button>` : ''}
+    ${badge}
+  `;
+  list.insertBefore(card, list.firstChild);
+}
+
+function updateTaskCard(task) {
+  const list  = document.getElementById('task-list');
+  const empty = document.getElementById('task-list-empty');
+  if (empty) empty.remove();
+
+  let card = document.getElementById(`task-card-${task.task_id}`);
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'job-card';
+    card.id = `task-card-${task.task_id}`;
+    list.insertBefore(card, list.firstChild);
+  }
+
+  const icons = { COMPLETED: '✅', SKIPPED: '⏭️', FAILED: '❌', QUEUED: '⏳', RUNNING: '⚡', PAUSED_NEEDS_LOGIN: '⏸️', PAUSED_BEFORE_SUBMIT: '⏸️', WAITING_USER_SUBMIT: '⏸️' };
+  let statusKey = task.status;
+  if (statusKey && statusKey.startsWith('PAUSED')) statusKey = 'PAUSED_BEFORE_SUBMIT'; 
+  const icon = icons[statusKey] || '⚡';
+  
+  const badgeClass = task.status === 'COMPLETED' ? 'applied' : task.status === 'FAILED' ? 'failed' : task.status.startsWith('PAUSED') ? 'skipped' : 'pending';
+  const badge = `<div class="job-badge ${badgeClass}">${task.status}</div>`;
+
+  let meta = '';
+  if (task.filled_fields_count > 0) {
+    meta += `<span class="success-text">${task.filled_fields_count} fields filled</span>`;
+  }
+  if (task.pause_reason) {
+    meta += `${meta ? ' · ' : ''}<span class="danger-text">${escHtml(task.pause_reason)}</span>`;
+  }
+
+  card.innerHTML = `
+    <div class="job-icon">${icon}</div>
+    <div class="job-info">
+      <div class="job-title"><a href="${task.job_url || task.current_url || '#'}" target="_blank">${escHtml(task.job_title || 'Unknown Role')}</a></div>
+      <div class="job-company">${escHtml(task.company || 'Unknown Company')}</div>
+      ${meta ? `<div class="job-meta">${meta}</div>` : ''}
+    </div>
+    ${task.status.startsWith('PAUSED') || task.status === 'WAITING_USER_SUBMIT' ? `<button class="btn btn-outline" style="padding:4px 8px;font-size:11px" onclick="triggerResume()">Resume Task</button>` : ''}
+    ${badge}
+  `;
 }
 
 function updateStats() {

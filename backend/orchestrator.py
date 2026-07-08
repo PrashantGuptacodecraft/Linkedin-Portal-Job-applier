@@ -367,7 +367,15 @@ async def _collect_job_urls(
         finally:
             await page.close()
 
-    # Post-filter: only keep jobs that have an external apply URL (skip Easy Apply)
+    # Post-filter: keep jobs we can act on. We now attempt Easy Apply too (the
+    # LinkedIn in-site modal), so those are no longer discarded — unless the user
+    # explicitly disabled it via filters.extra_params['skip_easy_apply'] = 'true'.
+    skip_easy = False
+    try:
+        skip_easy = str((req.filters.extra_params or {}).get("skip_easy_apply", "")).lower() in ("1", "true", "yes")
+    except Exception:
+        skip_easy = False
+
     filtered: List[str] = []
     for job_url in urls:
         if len(filtered) >= req.max_jobs:
@@ -382,7 +390,11 @@ async def _collect_job_urls(
             if res.apply_type == "external" and res.apply_url:
                 filtered.append(job_url)
             elif res.apply_type == "easy_apply":
-                emit({"type": "log", "level": "info", "message": f"Skipping Easy Apply job (not handled): {job_url}"})
+                if skip_easy:
+                    emit({"type": "log", "level": "info", "message": f"Skipping Easy Apply job (disabled): {job_url}"})
+                else:
+                    filtered.append(job_url)
+                    emit({"type": "log", "level": "info", "message": f"Queuing Easy Apply job: {job_url}"})
             elif res.error in ("captcha_required", "login_required", "registration_required"):
                 emit({"type": "log", "level": "warning", "message": f"Skipping — LinkedIn wall ({res.error}) while inspecting: {job_url}"})
             elif res.apply_type == "external" and not res.apply_url:
@@ -446,6 +458,34 @@ async def _process_one_job(
         return result
 
     if not apply_external:
+        return result
+
+    # ── Easy Apply (LinkedIn in-site modal) ───────────────────────────────────
+    # Handled on the LinkedIn detail page itself — no external portal tab.
+    if result.apply_type == "easy_apply":
+        try:
+            from .linkedin import handle_easy_apply
+            ea_outcome, ea_filled = await handle_easy_apply(
+                detail_page, result.job_url or job_url, req.candidate, emit=emit,
+            )
+            result.filled_fields = ea_filled
+            if ea_outcome == "confirmed":
+                result.status = JobStatus.APPLIED
+                _emit(emit, "log", level="success",
+                      message=f"  ✓ Easy Apply submitted & confirmed ({ea_filled} field(s)).")
+            elif ea_outcome == "manual":
+                result.status = JobStatus.MANUAL_REVIEW
+                result.error = "Easy Apply needs manual completion (extra questions/CAPTCHA) — left for review."
+                result.diagnostics_dir = await diag.capture(detail_page, f"easy_apply_manual_{result.job_id}")
+            else:
+                result.status = JobStatus.FAILED
+                result.error = f"Easy Apply could not be completed ({ea_outcome})."
+                result.diagnostics_dir = await diag.capture(detail_page, f"easy_apply_fail_{result.job_id}")
+        except Exception as exc:
+            logger.error(f"Easy Apply error for {job_url}: {exc}")
+            result.status = JobStatus.FAILED
+            result.error = f"Easy Apply error: {exc}"
+            result.diagnostics_dir = await diag.capture(detail_page, f"easy_apply_error_{result.job_id}")
         return result
 
     # ── Autofill external portal ──────────────────────────────────────────────

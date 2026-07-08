@@ -16,9 +16,10 @@ else
 fi
 
 echo "Starting LinkedIn Job Auto-Applier backend…"
-echo "UI → open frontend/index.html in your browser"
-echo "API → http://localhost:8000"
+echo "UI  → http://localhost:8000/"
+echo "API → http://localhost:8000/api/health"
 echo ""
 
-cd backend
-python main.py
+# Launch from the PROJECT ROOT (not backend/) so the "backend.main:app" package
+# import string resolves. Reload is off for a stable long-running server.
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --log-level info

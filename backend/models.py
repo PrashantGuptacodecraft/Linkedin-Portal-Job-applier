@@ -21,6 +21,24 @@ class JobStatus(str, Enum):
     MANUAL_REVIEW = "manual_review"
 
 
+class TaskStatus(str, Enum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    PAUSED_NEEDS_LOGIN = "PAUSED_NEEDS_LOGIN"
+    PAUSED_NEEDS_CAPTCHA = "PAUSED_NEEDS_CAPTCHA"
+    PAUSED_NEEDS_OTP = "PAUSED_NEEDS_OTP"
+    PAUSED_NEEDS_EMAIL_VERIFICATION = "PAUSED_NEEDS_EMAIL_VERIFICATION"
+    PAUSED_NEEDS_USER_ANSWER = "PAUSED_NEEDS_USER_ANSWER"
+    PAUSED_BEFORE_SUBMIT = "PAUSED_BEFORE_SUBMIT"
+    WAITING_USER_SUBMIT = "WAITING_USER_SUBMIT"
+    RESUMED = "RESUMED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+    NEEDS_REOPEN = "NEEDS_REOPEN"
+
+
+
 # ── Sub-Models ────────────────────────────────────────────────────────────────
 
 class Education(BaseModel):
@@ -80,13 +98,16 @@ class CandidateProfile(BaseModel):
     clearance_type: str = ""
     clearance_date: str = ""
     preferred_location: str = ""
-    willing_to_relocate: str = "No"
+    willing_to_relocate: str = "Yes"
     work_authorization: str = ""
     gender: str = ""
     ethnicity: str = ""
     veteran_status: str = ""
     disability_status: str = ""
-    salary_expectation: str = "50K"
+    # Leave blank by default: a hard-coded low figure like "50K" can auto-filter
+    # a candidate out. When empty, the resolver leaves salary fields blank / lets
+    # the AI omit them rather than committing to a number.
+    salary_expectation: str = ""
     notice_period: str = "2 weeks"
     availability_date: str = ""
     referral_source: str = ""
@@ -173,3 +194,58 @@ class SessionSummary(BaseModel):
 #   { "type": "error",       "message": "..." }
 #   { "type": "done" }
 #   ": keepalive"  (SSE comment – connection heartbeat)
+
+# ── Phase 1 Models ────────────────────────────────────────────────────────────
+
+class TaskEvent(BaseModel):
+    id: Optional[int] = None
+    task_id: str
+    event_type: str
+    message: str
+    timestamp: float
+
+class Task(BaseModel):
+    task_id: str
+    job_id: Optional[str] = None
+    job_title: Optional[str] = None
+    company: Optional[str] = None
+    job_url: Optional[str] = None
+    external_apply_url: Optional[str] = None
+    portal_domain: Optional[str] = None
+    detected_ats: Optional[str] = None
+    status: TaskStatus = TaskStatus.QUEUED
+    pause_reason: Optional[str] = None
+    current_url: Optional[str] = None
+    resume_uploaded: bool = False
+    filled_fields_count: int = 0
+    pending_fields_count: int = 0
+    diagnostics_path: Optional[str] = None
+    created_at: float
+    updated_at: float
+
+class ExtractedField(BaseModel):
+    field_id: str
+    selector: str
+    tag: str
+    input_type: Optional[str] = None
+    label: Optional[str] = None
+    aria_label: Optional[str] = None
+    placeholder: Optional[str] = None
+    name: Optional[str] = None
+    id: Optional[str] = None
+    required: bool = False
+    options: List[str] = Field(default_factory=list)
+    nearby_text: Optional[str] = None
+    visible: bool = True
+    value: Optional[str] = None
+    confidence: Optional[float] = None
+
+class FillDecision(BaseModel):
+    field_id: str
+    action: str  # fill/select/check/upload/skip/ask_user
+    value: Optional[str] = None
+    confidence: float
+    source: str  # rule/gemini/user
+    reason: Optional[str] = None
+    warning: Optional[str] = None
+
